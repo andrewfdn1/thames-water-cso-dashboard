@@ -10,41 +10,38 @@
 {% include "_nav.html" with context %}
 <main>
   <div class="stat-row">
+    {% for win in windows %}
     <div class="stat-tile">
-      <div class="value">{{ total_monitors }}</div>
-      <div class="label">CSO/EDM monitors tracked nationally</div>
+      <div class="value" style="color:var(--status-critical);">{{ total_hours_by_window[win.key] }}</div>
+      <div class="label">Total discharge into rivers &mdash; {{ win.label }}</div>
     </div>
-    <div class="stat-tile">
-      <div class="value">{{ total_discharging }}</div>
-      <div class="label">Currently discharging</div>
-    </div>
-    <div class="stat-tile">
-      <div class="value">{{ '%.1f'|format((total_discharging / total_monitors * 100) if total_monitors else 0) }}%</div>
-      <div class="label">Of tracked network discharging right now</div>
-    </div>
+    {% endfor %}
   </div>
+  <p style="color:var(--text-muted); font-size:0.8rem; margin:-14px 0 24px;">
+    Excludes discharge routed to the Tideway Tunnel (captured, not released to a river) &mdash; tracked separately below.
+  </p>
 
-  <div class="section-title">Waterways with active discharges</div>
+  <div class="section-title">Discharge hours by receiving watercourse</div>
   <table>
     <thead>
       <tr>
         <th>Receiving watercourse</th>
-        <th class="num">Monitors</th>
-        <th class="num">Discharging now</th>
+        {% for win in windows %}
+        <th class="num">Discharge ({{ win.key }})</th>
+        {% endfor %}
       </tr>
     </thead>
     <tbody>
       {% for w in waterways[:15] %}
-      <tr>
-        <td>{{ w.name }}</td>
-        <td class="num">{{ w.total }}</td>
+      {% set is_tunnel_row = w.name == 'Tideway Tunnel' %}
+      <tr class="{{ 'tunnel-row' if is_tunnel_row else '' }}">
+        <td>{{ w.name }}{% if is_tunnel_row %} <span style="color:var(--status-good); font-size:0.8em;">(captured)</span>{% endif %}</td>
+        {% for win in windows %}
+        {% set val = w.hours_by_window[win.key] %}
         <td class="num">
-          {% if w.discharging > 0 %}
-          <span class="status discharging"><span class="dot"></span>{{ w.discharging }}</span>
-          {% else %}
-          <span class="status not-discharging"><span class="dot"></span>0</span>
-          {% endif %}
+          <span class="hours-value {{ 'tunnel' if is_tunnel_row else ('zero' if val == '0h 00m' else 'active') }}">{{ val }}</span>
         </td>
+        {% endfor %}
       </tr>
       {% endfor %}
     </tbody>

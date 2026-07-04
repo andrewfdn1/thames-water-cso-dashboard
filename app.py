@@ -288,32 +288,46 @@ def build_dataset():
     secs_by_window = secs_by_window or {w["key"]: {} for w in _WINDOWS}
 
     stations = []
-    by_water = defaultdict(lambda: {"total": 0, "discharging": 0})
+    by_water_secs = defaultdict(lambda: {w["key"]: 0.0 for w in _WINDOWS})
+    tunnel_secs = {w["key"]: 0.0 for w in _WINDOWS}
+    total_secs = {w["key"]: 0.0 for w in _WINDOWS}
     total_discharging = 0
 
     for permit, m in monitors.items():
-        hours_by_window = {
-            w["key"]: _fmt_hrs(secs_by_window.get(w["key"], {}).get(permit, 0))
-            for w in _WINDOWS
-        }
+        secs = {w["key"]: secs_by_window.get(w["key"], {}).get(permit, 0) for w in _WINDOWS}
         is_discharging = m["status"].strip().lower() == "discharging"
         if is_discharging:
             total_discharging += 1
-        by_water[m["water"]]["total"] += 1
-        if is_discharging:
-            by_water[m["water"]]["discharging"] += 1
+
+        # Tideway-tunnel-connected discharge is captured, not released to a
+        # river, so it's tracked as its own bucket rather than folded into
+        # the receiving watercourse's (or the national) totals.
+        target = tunnel_secs if m["tunnel_connected_inferred"] else by_water_secs[m["water"]]
+        if not m["tunnel_connected_inferred"]:
+            for key in secs:
+                total_secs[key] += secs[key]
+        for key in secs:
+            target[key] += secs[key]
 
         stations.append({
             **m,
-            "hours_by_window": hours_by_window,
+            "hours_by_window": {k: _fmt_hrs(v) for k, v in secs.items()},
             "is_discharging": is_discharging,
         })
 
     stations.sort(key=lambda s: (not s["is_discharging"], s["name"]))
-    waterways = sorted(
-        ({"name": k, **v} for k, v in by_water.items()),
-        key=lambda w: (-w["discharging"], -w["total"]),
-    )
+
+    waterways = [
+        {"name": name, "hours_by_window": {k: _fmt_hrs(v) for k, v in secs.items()}}
+        for name, secs in sorted(
+            by_water_secs.items(),
+            key=lambda item: tuple(-item[1][w["key"]] for w in _WINDOWS),
+        )
+    ]
+    waterways.insert(0, {
+        "name": "Tideway Tunnel",
+        "hours_by_window": {k: _fmt_hrs(v) for k, v in tunnel_secs.items()},
+    })
 
     return {
         "stations":          stations,
@@ -322,6 +336,7 @@ def build_dataset():
         "default_window":    _DEFAULT_WINDOW,
         "total_monitors":    len(stations),
         "total_discharging": total_discharging,
+        "total_hours_by_window": {k: _fmt_hrs(v) for k, v in total_secs.items()},
         "monitors_fetched_at": monitors_fetched_at,
         "windows_fetched_at":  windows_fetched_at,
     }

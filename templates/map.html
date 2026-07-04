@@ -11,11 +11,9 @@
 <body>
 {% include "_nav.html" with context %}
 <main>
-  <div class="legend">
-    <span class="status discharging"><span class="dot"></span>Discharging</span>
-    <span class="status not-discharging"><span class="dot"></span>Not discharging</span>
-    <span class="status unknown"><span class="dot"></span>Unknown / offline</span>
-  </div>
+  <p style="color:var(--text-secondary); font-size:0.85rem; margin:0 0 10px;">
+    Marker colour = receiving watercourse. Larger, brighter markers are currently discharging. Hover a marker for full details.
+  </p>
   <div id="map"></div>
   <p style="color:var(--text-muted); font-size:0.8rem; margin-top:8px;">
     Tunnel-connection flag is inferred from the API's own receivingWaterCourse text
@@ -37,26 +35,35 @@
     maxZoom: 19,
   }).addTo(map);
 
-  const colors = { discharging: '#e66767', not_discharging: '#0ca30c', unknown: '#898781' };
+  function colorForWater(name) {
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) {
+      hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+    }
+    return 'hsl(' + (hash % 360) + ', 65%, 45%)';
+  }
 
   stations.forEach(function (s) {
     if (s.lat == null || s.lon == null) return;
-    const key = s.is_discharging ? 'discharging' : (s.status && s.status.toLowerCase() !== 'unknown' ? 'not_discharging' : 'unknown');
+    const color = colorForWater(s.water || 'Unknown');
     const marker = L.circleMarker([s.lat, s.lon], {
-      radius: s.is_discharging ? 7 : 5,
-      color: colors[key],
-      fillColor: colors[key],
-      fillOpacity: 0.85,
+      radius: s.is_discharging ? 7 : 4,
+      color: color,
+      fillColor: color,
+      fillOpacity: s.is_discharging ? 0.9 : 0.55,
       weight: 1,
     }).addTo(map);
     const tunnel = s.tunnel_connected_inferred ? '<div style="color:#3987e5;">Tideway tunnel-connected (inferred)</div>' : '';
-    marker.bindPopup(
+    marker.bindTooltip(
       '<div style="font-weight:600;">' + s.name + '</div>' +
       '<div>' + s.water + '</div>' +
       '<div>Status: ' + s.status + '</div>' +
-      '<div>Discharge (24h): ' + s.hours_by_window['24h'] + '</div>' +
+      '<div>Discharge 24h: ' + s.hours_by_window['24h'] + '</div>' +
+      '<div>Discharge 7d: ' + s.hours_by_window['7d'] + '</div>' +
+      '<div>Discharge 30d: ' + s.hours_by_window['30d'] + '</div>' +
       tunnel +
-      '<div style="color:#888; font-size:0.85em; margin-top:4px;">' + s.permit + '</div>'
+      '<div style="color:#888; font-size:0.85em; margin-top:4px;">' + s.permit + '</div>',
+      { sticky: true, direction: 'top', opacity: 0.95, className: 'cso-tooltip' }
     );
   });
 </script>

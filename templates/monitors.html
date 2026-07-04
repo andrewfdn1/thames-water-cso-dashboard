@@ -32,11 +32,19 @@
     </thead>
     <tbody>
       {% for s in stations %}
-      {% set status_class = 'discharging' if s.is_discharging else ('unknown' if s.status|lower == 'unknown' else 'not-discharging') %}
-      <tr data-search="{{ (s.name ~ ' ' ~ s.water ~ ' ' ~ s.permit) | lower }}" data-status="{{ status_class }}">
-        <td>{{ s.name }}</td>
-        <td>{{ s.water }}{% if s.tunnel_connected_inferred %} <span style="color:#2a78d6; font-size:0.8em;">(tunnel, inferred)</span>{% endif %}</td>
-        <td><span class="status {{ status_class }}"><span class="dot"></span>{{ s.status }}</span></td>
+      {% set data_status = 'discharging' if s.is_discharging else ('unknown' if s.status|lower == 'unknown' else 'not-discharging') %}
+      {% set is_tunnel_discharge = s.is_discharging and s.tunnel_connected_inferred %}
+      {% set display_status_class = 'tunnel-discharging' if is_tunnel_discharge else data_status %}
+      <tr class="{{ 'tunnel-row' if is_tunnel_discharge else '' }}" data-search="{{ (s.name ~ ' ' ~ s.water ~ ' ' ~ s.permit) | lower }}" data-status="{{ data_status }}">
+        <td>
+          {% if s.lat is not none and s.lon is not none %}
+          <a href="https://www.google.com/maps?q={{ s.lat }},{{ s.lon }}" target="_blank" rel="noopener">{{ s.name }}</a>
+          {% else %}
+          {{ s.name }}
+          {% endif %}
+        </td>
+        <td>{{ s.water }}{% if s.tunnel_connected_inferred %} <span style="color:var(--status-good); font-size:0.8em;">(tunnel, inferred)</span>{% endif %}</td>
+        <td><span class="status {{ display_status_class }}"><span class="dot"></span>{{ s.status }}</span></td>
         <td class="num">{{ s.hours_by_window['24h'] }}</td>
         <td class="num">{{ s.hours_by_window['7d'] }}</td>
         <td class="num">{{ s.hours_by_window['30d'] }}</td>
