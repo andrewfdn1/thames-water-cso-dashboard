@@ -41,16 +41,17 @@ _STATUS_URL  = "https://api.thameswater.co.uk/opendata/v2/discharge/status"
 _ALERTS_URL  = "https://api.thameswater.co.uk/opendata/v2/discharge/alerts"
 _PAGE_LIMIT  = 200
 
-# Kept modest deliberately: a national Start+Stop pull is already two full
-# paginated sweeps of every permit in the country. Lookback windows are 24h
-# and 7d only (no 30d) to keep a cold-cache fetch bounded to roughly a
-# minute rather than several.
+# A national Start+Stop pull is two full paginated sweeps of every permit in
+# the country, but measured timing (see thames-water-api-diagnostic.yml) is
+# ~7s for a 7-day window nationally, so a 30d window is not the bottleneck
+# it was assumed to be.
 _WINDOWS = [
     {"key": "24h", "label": "24 hours", "hours": 24},
     {"key": "7d",  "label": "7 days",   "hours": 168},
+    {"key": "30d", "label": "30 days",  "hours": 720},
 ]
 _DEFAULT_WINDOW   = "24h"
-_LOOKBACK_DAYS    = 7
+_LOOKBACK_DAYS    = 30
 
 _cache          = {}
 _cache_lock     = threading.Lock()

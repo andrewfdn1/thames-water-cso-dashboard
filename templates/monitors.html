@@ -26,6 +26,7 @@
         <th>Status</th>
         <th class="num">Discharge (24h)</th>
         <th class="num">Discharge (7d)</th>
+        <th class="num">Discharge (30d)</th>
         <th>Permit</th>
       </tr>
     </thead>
@@ -38,6 +39,7 @@
         <td><span class="status {{ status_class }}"><span class="dot"></span>{{ s.status }}</span></td>
         <td class="num">{{ s.hours_by_window['24h'] }}</td>
         <td class="num">{{ s.hours_by_window['7d'] }}</td>
+        <td class="num">{{ s.hours_by_window['30d'] }}</td>
         <td style="color:var(--text-muted); font-size:0.85em;">{{ s.permit }}</td>
       </tr>
       {% endfor %}
