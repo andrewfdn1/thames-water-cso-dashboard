@@ -191,7 +191,9 @@ def get_all_monitors():
     which permits are tracked, since the point of this dashboard is
     everything the API knows about, not a hand-picked subset."""
     def fetch():
+        t0 = time.monotonic()
         items = _fetch_all_pages(_STATUS_URL, {})
+        print(f"discharge/status pull: {len(items)} items, {time.monotonic() - t0:.1f}s")
         monitors = {}
         for item in items:
             permit = item.get("permitNumber")
@@ -219,6 +221,7 @@ def get_discharge_windows():
     configured window. Mirrors the discharge/alerts fetch pattern proven
     in the sister frbc-tides project, generalised to no permit filter."""
     def fetch():
+        t0 = time.monotonic()
         now_utc = datetime.now(timezone.utc)
         date_end = now_utc.strftime("%Y-%m-%d")
         date_start = (now_utc - timedelta(days=_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
@@ -227,6 +230,12 @@ def get_discharge_windows():
         starts = _fetch_all_pages(_ALERTS_URL, dict(params, alertType="Start"))
         time.sleep(1)
         stops = _fetch_all_pages(_ALERTS_URL, dict(params, alertType="Stop"))
+        print(
+            f"discharge/alerts pull ({date_start}..{date_end}): "
+            f"{len(starts)} starts, {len(stops)} stops, {time.monotonic() - t0:.1f}s"
+        )
+        if starts:
+            print(f"sample start permit: {starts[0].get('permitNumber')!r}")
 
         stops_by_permit = defaultdict(list)
         for s in stops:
@@ -262,7 +271,12 @@ def get_discharge_windows():
                     secs[permit] += (clipped_stop - clipped_start).total_seconds()
             return secs
 
-        return {w["key"]: secs_for_window(w["hours"]) for w in _WINDOWS}
+        windows = {w["key"]: secs_for_window(w["hours"]) for w in _WINDOWS}
+        print(
+            f"discharge windows computed: {len(intervals)} intervals, "
+            + ", ".join(f"{k}={len(v)} permits" for k, v in windows.items())
+        )
+        return windows
 
     return get_cached("discharge_windows", fetch, ttl_seconds=1800)
 
