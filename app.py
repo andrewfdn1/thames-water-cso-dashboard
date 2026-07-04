@@ -61,7 +61,20 @@ def get_cached(key, fetch_fn, ttl_seconds):
     now = datetime.now(timezone.utc).timestamp()
     if key in _cache and now - _cache[key]["ts"] < ttl_seconds:
         return _cache[key]["data"], _cache[key]["fetched_at"]
-    with _cache_lock:
+
+    # Non-blocking: if another thread (typically the startup prewarm) is
+    # already mid-fetch, serve whatever's cached instead of waiting on it.
+    # Blocking here used to let gunicorn's worker-timeout kill the process
+    # mid-request whenever a request landed during a slow prewarm, which
+    # then made the *next* worker's very first fetch look suspiciously
+    # unreliable too — this avoids the request thread ever blocking on a
+    # live network call at all.
+    if not _cache_lock.acquire(blocking=False):
+        if key in _cache:
+            return _cache[key]["data"], _cache[key]["fetched_at"]
+        return None, ""
+
+    try:
         now = datetime.now(timezone.utc).timestamp()
         if key in _cache and now - _cache[key]["ts"] < ttl_seconds:
             return _cache[key]["data"], _cache[key]["fetched_at"]
@@ -75,6 +88,8 @@ def get_cached(key, fetch_fn, ttl_seconds):
             if key in _cache:
                 return _cache[key]["data"], _cache[key]["fetched_at"]
             return None, ""
+    finally:
+        _cache_lock.release()
 
 
 def _fetch_all_pages(url, params):
