@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Thames Water CSO Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+{% include "_nav.html" with context %}
+<main>
+  <div class="stat-row">
+    <div class="stat-tile">
+      <div class="value">{{ total_monitors }}</div>
+      <div class="label">CSO/EDM monitors tracked nationally</div>
+    </div>
+    <div class="stat-tile">
+      <div class="value">{{ total_discharging }}</div>
+      <div class="label">Currently discharging</div>
+    </div>
+    <div class="stat-tile">
+      <div class="value">{{ '%.1f'|format((total_discharging / total_monitors * 100) if total_monitors else 0) }}%</div>
+      <div class="label">Of tracked network discharging right now</div>
+    </div>
+  </div>
+
+  <div class="section-title">Waterways with active discharges</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Receiving watercourse</th>
+        <th class="num">Monitors</th>
+        <th class="num">Discharging now</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for w in waterways[:15] %}
+      <tr>
+        <td>{{ w.name }}</td>
+        <td class="num">{{ w.total }}</td>
+        <td class="num">
+          {% if w.discharging > 0 %}
+          <span class="status discharging"><span class="dot"></span>{{ w.discharging }}</span>
+          {% else %}
+          <span class="status not-discharging"><span class="dot"></span>0</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</main>
+<footer>
+  Source: <a href="https://docs.api.thameswater.co.uk/" target="_blank">Thames Water Open Data API v2</a> (discharge/status, discharge/alerts) &middot;
+  Monitor list refreshed {{ monitors_fetched_at }} &middot; Discharge durations ({{ default_window }}) refreshed {{ windows_fetched_at }}
+</footer>
+</body>
+</html>

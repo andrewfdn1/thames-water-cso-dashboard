@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>All monitors — Thames Water CSO Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+{% include "_nav.html" with context %}
+<main>
+  <div class="filters">
+    <input id="search" type="search" placeholder="Search by site name, watercourse or permit&hellip;">
+    <select id="status-filter">
+      <option value="">All statuses</option>
+      <option value="discharging">Discharging</option>
+      <option value="not-discharging">Not discharging</option>
+      <option value="unknown">Unknown / offline</option>
+    </select>
+  </div>
+  <table id="monitor-table">
+    <thead>
+      <tr>
+        <th>Site name</th>
+        <th>Receiving watercourse</th>
+        <th>Status</th>
+        <th class="num">Discharge (24h)</th>
+        <th class="num">Discharge (7d)</th>
+        <th>Permit</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in stations %}
+      {% set status_class = 'discharging' if s.is_discharging else ('unknown' if s.status|lower == 'unknown' else 'not-discharging') %}
+      <tr data-search="{{ (s.name ~ ' ' ~ s.water ~ ' ' ~ s.permit) | lower }}" data-status="{{ status_class }}">
+        <td>{{ s.name }}</td>
+        <td>{{ s.water }}{% if s.tunnel_connected_inferred %} <span style="color:#2a78d6; font-size:0.8em;">(tunnel, inferred)</span>{% endif %}</td>
+        <td><span class="status {{ status_class }}"><span class="dot"></span>{{ s.status }}</span></td>
+        <td class="num">{{ s.hours_by_window['24h'] }}</td>
+        <td class="num">{{ s.hours_by_window['7d'] }}</td>
+        <td style="color:var(--text-muted); font-size:0.85em;">{{ s.permit }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</main>
+<footer>
+  {{ total_monitors }} monitors &middot; monitor list refreshed {{ monitors_fetched_at }} &middot; discharge durations refreshed {{ windows_fetched_at }}
+</footer>
+<script>
+  const search = document.getElementById('search');
+  const statusFilter = document.getElementById('status-filter');
+  const rows = Array.from(document.querySelectorAll('#monitor-table tbody tr'));
+
+  function applyFilters() {
+    const q = search.value.trim().toLowerCase();
+    const status = statusFilter.value;
+    rows.forEach(function (row) {
+      const matchesSearch = !q || row.dataset.search.includes(q);
+      const matchesStatus = !status || row.dataset.status === status;
+      row.style.display = (matchesSearch && matchesStatus) ? '' : 'none';
+    });
+  }
+
+  search.addEventListener('input', applyFilters);
+  statusFilter.addEventListener('change', applyFilters);
+</script>
+</body>
+</html>

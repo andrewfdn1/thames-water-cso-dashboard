@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Map — Thames Water CSO Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+</head>
+<body>
+{% include "_nav.html" with context %}
+<main>
+  <div class="legend">
+    <span class="status discharging"><span class="dot"></span>Discharging</span>
+    <span class="status not-discharging"><span class="dot"></span>Not discharging</span>
+    <span class="status unknown"><span class="dot"></span>Unknown / offline</span>
+  </div>
+  <div id="map"></div>
+  <p style="color:var(--text-muted); font-size:0.8rem; margin-top:8px;">
+    Tunnel-connection flag is inferred from the API's own receivingWaterCourse text
+    ("via the Tideway tunnel") rather than manually verified per site — it hasn't
+    been cross-checked against Thames Water's site-by-site FAQ pages the way the
+    sister frbc-tides project does for its ~70 curated Hammersmith-area monitors,
+    since that doesn't scale to a full national list.
+  </p>
+</main>
+<footer>
+  {{ total_monitors }} monitors plotted &middot; refreshed {{ monitors_fetched_at }}
+</footer>
+<script>
+  const stations = {{ stations | tojson }};
+  const map = L.map('map').setView([52.0, -1.2], 6);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap &copy; CARTO',
+    subdomains: 'abcd',
+    maxZoom: 19,
+  }).addTo(map);
+
+  const colors = { discharging: '#e66767', not_discharging: '#0ca30c', unknown: '#898781' };
+
+  stations.forEach(function (s) {
+    if (s.lat == null || s.lon == null) return;
+    const key = s.is_discharging ? 'discharging' : (s.status && s.status.toLowerCase() !== 'unknown' ? 'not_discharging' : 'unknown');
+    const marker = L.circleMarker([s.lat, s.lon], {
+      radius: s.is_discharging ? 7 : 5,
+      color: colors[key],
+      fillColor: colors[key],
+      fillOpacity: 0.85,
+      weight: 1,
+    }).addTo(map);
+    const tunnel = s.tunnel_connected_inferred ? '<div style="color:#3987e5;">Tideway tunnel-connected (inferred)</div>' : '';
+    marker.bindPopup(
+      '<div style="font-weight:600;">' + s.name + '</div>' +
+      '<div>' + s.water + '</div>' +
+      '<div>Status: ' + s.status + '</div>' +
+      '<div>Discharge (24h): ' + s.hours_by_window['24h'] + '</div>' +
+      tunnel +
+      '<div style="color:#888; font-size:0.85em; margin-top:4px;">' + s.permit + '</div>'
+    );
+  });
+</script>
+</body>
+</html>
