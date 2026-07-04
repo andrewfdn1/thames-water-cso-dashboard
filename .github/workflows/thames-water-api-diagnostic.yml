@@ -1,0 +1,103 @@
+name: Thames Water API diagnostic
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compare discharge/status vs discharge/alerts permit formats and timing
+        run: |
+          python3 - <<'PYEOF'
+          import requests, time
+          from datetime import datetime, timezone, timedelta
+
+          BASE = "https://api.thameswater.co.uk/opendata/v2/discharge"
+          HEADERS = {"User-Agent": "Mozilla/5.0"}
+          PAGE_LIMIT = 200
+
+          def fetch_all_pages(url, params):
+              items = []
+              offset = 0
+              page_count = 0
+              retry_429_count = 0
+              while True:
+                  page_params = dict(params, limit=PAGE_LIMIT, offset=offset)
+                  for attempt in range(3):
+                      r = requests.get(url, params=page_params, headers=HEADERS, timeout=20)
+                      if r.status_code == 429:
+                          retry_429_count += 1
+                          time.sleep(2 ** attempt)
+                          continue
+                      break
+                  r.raise_for_status()
+                  page = r.json().get("items", [])
+                  items.extend(page)
+                  page_count += 1
+                  if len(page) < PAGE_LIMIT:
+                      break
+                  offset += PAGE_LIMIT
+                  time.sleep(1)
+              return items, page_count, retry_429_count
+
+          def norm(p):
+              return (p or "").strip().upper()
+
+          print("## Fetching discharge/status (all permits, national)")
+          t0 = time.time()
+          status_items, status_pages, status_429s = fetch_all_pages(f"{BASE}/status", {})
+          t1 = time.time()
+          print(f"status: {len(status_items)} items, {status_pages} pages, {status_429s} retry-429s, {t1 - t0:.1f}s")
+
+          status_permits = [item.get("permitNumber") for item in status_items]
+          print(f"sample status permits (raw repr): {[repr(p) for p in status_permits[:5]]}")
+
+          now_utc = datetime.now(timezone.utc)
+          date_end = now_utc.strftime("%Y-%m-%d")
+          date_start = (now_utc - timedelta(days=7)).strftime("%Y-%m-%d")
+          alert_params = {"dateStart": date_start, "dateEnd": date_end}
+
+          print()
+          print("## Fetching discharge/alerts Start (7-day national lookback)")
+          t2 = time.time()
+          starts, starts_pages, starts_429s = fetch_all_pages(f"{BASE}/alerts", dict(alert_params, alertType="Start"))
+          t3 = time.time()
+          print(f"starts: {len(starts)} items, {starts_pages} pages, {starts_429s} retry-429s, {t3 - t2:.1f}s")
+
+          print()
+          print("## Fetching discharge/alerts Stop (7-day national lookback)")
+          t4 = time.time()
+          stops, stops_pages, stops_429s = fetch_all_pages(f"{BASE}/alerts", dict(alert_params, alertType="Stop"))
+          t5 = time.time()
+          print(f"stops: {len(stops)} items, {stops_pages} pages, {stops_429s} retry-429s, {t5 - t4:.1f}s")
+
+          alert_permits = [item.get("permitNumber") for item in starts]
+          print(f"sample alert permits (raw repr): {[repr(p) for p in alert_permits[:5]]}")
+
+          print()
+          print(f"## TOTAL elapsed for status + starts + stops: {t5 - t0:.1f}s (gunicorn timeout is 180s)")
+
+          print()
+          print("## Permit format / overlap check")
+          status_set = set(status_permits)
+          alert_set = set(alert_permits) | set(item.get("permitNumber") for item in stops)
+          overlap_raw = status_set & alert_set
+          print(f"status permits (unique): {len(status_set)}")
+          print(f"alert permits (unique): {len(alert_set)}")
+          print(f"raw-string overlap: {len(overlap_raw)}")
+
+          norm_status_set = set(norm(p) for p in status_set)
+          norm_alert_set = set(norm(p) for p in alert_set)
+          overlap_norm = norm_status_set & norm_alert_set
+          print(f"normalised (strip+upper) overlap: {len(overlap_norm)} / status={len(norm_status_set)} alert={len(norm_alert_set)}")
+
+          if status_set and alert_set:
+              sample_status = next(iter(status_set))
+              matches_in_alerts = [p for p in alert_set if norm(p) == norm(sample_status)]
+              print(f"sample status permit {sample_status!r} -> matches in alert set: {[repr(p) for p in matches_in_alerts]}")
+          PYEOF
