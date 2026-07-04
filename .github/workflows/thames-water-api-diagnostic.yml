@@ -11,6 +11,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install dependencies
+        run: pip install requests
+
       - name: Compare discharge/status vs discharge/alerts permit formats and timing
         run: |
           python3 - <<'PYEOF'
