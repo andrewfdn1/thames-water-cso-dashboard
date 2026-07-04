@@ -1,0 +1,69 @@
+name: Render deploy watch
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  render-status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Render service, deploy status, and recent logs
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE_NAME: thames-water-cso-dashboard
+        run: |
+          set -euo pipefail
+          if [ -z "${RENDER_API_KEY:-}" ]; then
+            echo "::error::RENDER_API_KEY secret is not set. Add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          API="https://api.render.com/v1"
+          AUTH="Authorization: Bearer ${RENDER_API_KEY}"
+
+          echo "## Workspaces accessible to this API key"
+          owners_json=$(curl -sf -H "$AUTH" "$API/owners?limit=20")
+          echo "$owners_json" | jq -r '.[] | "\(.owner.id)\t\(.owner.name)\t\(.owner.type)"' | column -t -s $'\t'
+
+          echo ""
+          echo "## Looking up service: ${SERVICE_NAME}"
+          service_id=""
+          owner_id=""
+          all_services=""
+          for oid in $(echo "$owners_json" | jq -r '.[].owner.id'); do
+            services_json=$(curl -sf -H "$AUTH" "$API/services?ownerId=${oid}&limit=100")
+            all_services="${all_services}
+          $(echo "$services_json" | jq -r --arg oid "$oid" '.[] | "\(.service.id)\t\(.service.name)\t\($oid)"')"
+            match=$(echo "$services_json" | jq -r --arg name "$SERVICE_NAME" '.[] | select(.service.name == $name) | .service.id' | head -n1)
+            if [ -n "$match" ]; then
+              service_id="$match"
+              owner_id="$oid"
+              break
+            fi
+          done
+
+          if [ -z "$service_id" ]; then
+            echo "::error::No service named '${SERVICE_NAME}' found in any workspace this key can see."
+            echo "Services visible to this key (id, name, ownerId):"
+            echo "$all_services"
+            exit 1
+          fi
+          echo "Service ID: $service_id (owner: $owner_id)"
+
+          echo ""
+          echo "## Recent deploys"
+          deploy_json=$(curl -sf -H "$AUTH" "$API/services/${service_id}/deploys?limit=5")
+          echo "$deploy_json" | jq -r '.[] | "\(.deploy.id)\t\(.deploy.status)\tstarted=\(.deploy.createdAt)\tfinished=\(.deploy.finishedAt // "in progress")\t\(.deploy.commit.message // "")"' | column -t -s $'\t'
+
+          latest_status=$(echo "$deploy_json" | jq -r '.[0].deploy.status // empty')
+          echo ""
+          echo "Latest deploy status: ${latest_status:-unknown}"
+
+          echo ""
+          echo "## Recent logs"
+          if ! curl -sf -H "$AUTH" "$API/logs?ownerId=${owner_id}&resource=${service_id}&limit=200&direction=backward" \
+              | jq -r '.logs[]? | "\(.timestamp)  \(.message)"'; then
+            echo "::warning::Could not fetch logs from Render logs API (endpoint or params may differ from what's expected)."
+          fi
