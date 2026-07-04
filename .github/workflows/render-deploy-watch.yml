@@ -53,6 +53,11 @@ jobs:
           echo "Service ID: $service_id (owner: $owner_id)"
 
           echo ""
+          echo "## Service repo/branch/auto-deploy config"
+          service_detail_json=$(curl -sf -H "$AUTH" "$API/services/${service_id}")
+          echo "$service_detail_json" | jq -r '"repo=\(.repo // "?")\nbranch=\(.branch // "?")\nautoDeploy=\(.autoDeploy // "?")\nautoDeployTrigger=\(.autoDeployTrigger // "?")"'
+
+          echo ""
           echo "## Recent deploys"
           deploy_json=$(curl -sf -H "$AUTH" "$API/services/${service_id}/deploys?limit=5")
           echo "$deploy_json" | jq -r '.[] | "\(.deploy.id)\t\(.deploy.status)\tstarted=\(.deploy.createdAt)\tfinished=\(.deploy.finishedAt // "in progress")\t\(.deploy.commit.message // "")"' | column -t -s $'\t'
