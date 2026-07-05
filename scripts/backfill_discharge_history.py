@@ -62,7 +62,7 @@ except ImportError:
 
 
 def db_connect():
-    conn = db.connect(DB_PATH)
+    conn = db.connect(DB_PATH, env_prefix="TURSO_DISCHARGE")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS discharge_events (
             permit    TEXT NOT NULL,
