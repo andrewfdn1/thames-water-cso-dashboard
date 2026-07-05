@@ -36,7 +36,7 @@
     </tbody>
   </table>
   <p style="color:var(--text-muted); font-size:0.8rem; margin:-18px 0 24px;">
-    Each chart also overlays total national discharge hours per week (excluding the Tideway Tunnel) on the right-hand axis, for the same period.
+    Each chart also overlays two discharge series per week (excluding the Tideway Tunnel) on the right-hand axis: the national total, and discharge direct to the River Thames itself.
   </p>
 
   {% for key, label in [('frbc', 'FRBC'), ('ptrc', 'PTRC')] %}
@@ -57,7 +57,8 @@
 <script>
   const WEEK_LABELS = {{ week_labels | tojson }};
   const CHART_DATA = {{ chart_data | tojson }};
-  const DISCHARGE_HOURS = {{ discharge_hours | tojson }};
+  const NATIONAL_HOURS = {{ national_hours | tojson }};
+  const THAMES_HOURS = {{ thames_hours | tojson }};
   const SITE_LABELS = {frbc: 'FRBC', ptrc: 'PTRC'};
 
   Object.keys(CHART_DATA).forEach(function (key) {
@@ -84,10 +85,21 @@
             yAxisID: 'y',
           },
           {
-            label: 'Total discharge, excl. Tideway Tunnel (hours/week)',
-            data: DISCHARGE_HOURS,
+            label: 'National discharge, excl. Tideway Tunnel (hours/week)',
+            data: NATIONAL_HOURS,
             borderColor: '#3987e5',
             backgroundColor: 'rgba(57,135,229,0.08)',
+            pointRadius: 0,
+            borderWidth: 1.5,
+            tension: 0.15,
+            fill: false,
+            yAxisID: 'y1',
+          },
+          {
+            label: 'Direct to River Thames (hours/week)',
+            data: THAMES_HOURS,
+            borderColor: '#0ca30c',
+            backgroundColor: 'rgba(12,163,12,0.08)',
             pointRadius: 0,
             borderWidth: 1.5,
             tension: 0.15,
