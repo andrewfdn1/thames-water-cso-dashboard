@@ -72,3 +72,8 @@ jobs:
               | jq -r '.logs[]? | "\(.timestamp)  \(.message)"'; then
             echo "::warning::Could not fetch logs from Render logs API (endpoint or params may differ from what's expected)."
           fi
+
+          echo ""
+          echo "## Live /data response right now"
+          live_json=$(curl -sf "https://thames-water-cso-dashboard.onrender.com/data" || echo '{}')
+          echo "$live_json" | jq '{total_monitors, total_discharging, monitors_fetched_at, windows_fetched_at, total_hours_by_window, waterways: (.waterways // [] | .[0:3])}'
