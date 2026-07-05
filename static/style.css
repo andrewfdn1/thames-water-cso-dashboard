@@ -320,31 +320,21 @@ a { color: inherit; }
   margin-bottom: 28px;
 }
 
-.zone-toggles {
+.zone-select-row {
   display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 10px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
 }
 
-.zone-toggle {
-  font-size: 0.78rem;
-  padding: 4px 12px;
-  border-radius: 999px;
+.zone-select {
+  padding: 6px 10px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--surface-1);
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.zone-toggle:hover {
-  background: var(--page-plane);
   color: var(--text-primary);
-}
-
-.zone-toggle.active {
-  background: var(--text-primary);
-  color: var(--page-plane);
-  border-color: var(--text-primary);
-  font-weight: 600;
+  font-size: 0.85rem;
+  min-width: 220px;
 }

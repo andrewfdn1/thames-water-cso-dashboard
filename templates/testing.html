@@ -36,13 +36,16 @@
     </tbody>
   </table>
   <p style="color:var(--text-muted); font-size:0.8rem; margin:-18px 0 24px;">
-    Each chart also overlays discharge hours per week (right-hand axis) for one CSO zone at a time &mdash; use the toggles to switch zones. National and individual watercourses are on very different scales, so only one is shown at once.
+    Each chart also overlays discharge hours per week (right-hand axis) for one CSO zone at a time &mdash; pick a zone from the dropdown. National and individual watercourses are on very different scales, so only one is shown at once.
   </p>
 
   {% for key, label in [('frbc', 'FRBC'), ('ptrc', 'PTRC')] %}
   <div class="section-title">{{ label }} &mdash; E coli readings and discharge, last 12 months</div>
   {% if chart_has_data[key] %}
-  <div class="zone-toggles" id="zone-toggles-{{ key }}"></div>
+  <div class="zone-select-row">
+    <label for="zone-select-{{ key }}">Discharge zone:</label>
+    <select id="zone-select-{{ key }}" class="zone-select"></select>
+  </div>
   <div class="chart-card">
     <canvas id="chart-{{ key }}" height="90"></canvas>
   </div>
@@ -133,22 +136,19 @@
       },
     });
 
-    const togglesEl = document.getElementById('zone-toggles-' + key);
+    const selectEl = document.getElementById('zone-select-' + key);
     ZONE_NAMES.forEach(function (zone) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'zone-toggle' + (zone === currentZone ? ' active' : '');
-      btn.textContent = zone;
-      btn.addEventListener('click', function () {
-        currentZone = zone;
-        chart.data.datasets[1].data = DISCHARGE_ZONES[zone];
-        chart.data.datasets[1].label = zone + ' discharge (hours/week)';
-        chart.update();
-        togglesEl.querySelectorAll('.zone-toggle').forEach(function (b) {
-          b.classList.toggle('active', b === btn);
-        });
-      });
-      togglesEl.appendChild(btn);
+      const opt = document.createElement('option');
+      opt.value = zone;
+      opt.textContent = zone;
+      if (zone === currentZone) opt.selected = true;
+      selectEl.appendChild(opt);
+    });
+    selectEl.addEventListener('change', function () {
+      const zone = selectEl.value;
+      chart.data.datasets[1].data = DISCHARGE_ZONES[zone];
+      chart.data.datasets[1].label = zone + ' discharge (hours/week)';
+      chart.update();
     });
   });
 </script>
