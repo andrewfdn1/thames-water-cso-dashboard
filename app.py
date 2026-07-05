@@ -7,13 +7,14 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 import csv
 import re
-import sqlite3
 import requests
 import threading
 import traceback
 import time
 import math
 import os
+
+import db
 
 app = Flask(__name__)
 
@@ -685,8 +686,7 @@ def _wq_fetch_site(url, site_label):
 
 
 def _wq_db_connect():
-    os.makedirs(os.path.dirname(_WQ_DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(_WQ_DB_PATH)
+    conn = db.connect(_WQ_DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ecoli_readings (
             site           TEXT NOT NULL,

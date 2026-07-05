@@ -33,9 +33,12 @@ Politeness / respectfulness toward a free public API:
 import os
 import sys
 import time
-import sqlite3
 from collections import defaultdict
 from datetime import datetime, date, timedelta, timezone
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _PROJECT_ROOT)
+import db  # noqa: E402 -- local sqlite3 by default, or Turso if configured (see db.py)
 
 BASE = "https://api.thameswater.co.uk/opendata/v2/discharge"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -48,7 +51,7 @@ CHUNK_DAYS = 14
 # go-live avoids treating that sparse pre-launch snapshot as real history.
 GO_LIVE_DATE = date(2022, 12, 30)
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "discharge_history.db")
+DB_PATH = os.path.join(_PROJECT_ROOT, "data", "discharge_history.db")
 
 try:
     import requests
@@ -59,8 +62,7 @@ except ImportError:
 
 
 def db_connect():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = db.connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS discharge_events (
             permit    TEXT NOT NULL,
