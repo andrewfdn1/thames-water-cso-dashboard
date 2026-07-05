@@ -396,6 +396,30 @@ def ping():
     return "ok"
 
 
+@app.route("/debug-cache")
+def debug_cache():
+    """Temporary diagnostic: dump the raw in-memory cache state directly,
+    bypassing build_dataset(), to see whether _cache itself is populated
+    or whether the bug is downstream of it."""
+    now = datetime.now(timezone.utc).timestamp()
+    lock_acquired = _cache_lock.acquire(blocking=False)
+    if lock_acquired:
+        _cache_lock.release()
+    return jsonify({
+        "pid": os.getpid(),
+        "lock_was_free": lock_acquired,
+        "cache_keys": list(_cache.keys()),
+        "cache_detail": {
+            k: {
+                "age_seconds": round(now - v["ts"], 1),
+                "fetched_at": v["fetched_at"],
+                "data_len": len(v["data"]) if hasattr(v["data"], "__len__") else repr(v["data"])[:100],
+            }
+            for k, v in _cache.items()
+        },
+    })
+
+
 def _prewarm():
     print("Pre-warming national CSO cache on startup...")
     try:

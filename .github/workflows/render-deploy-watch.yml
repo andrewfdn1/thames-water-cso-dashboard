@@ -81,3 +81,7 @@ jobs:
           echo "## Live /data response right now"
           live_json=$(curl -sf "https://thames-water-cso-dashboard.onrender.com/data?cachebust=$(date +%s)-2" || echo '{}')
           echo "$live_json" | jq '{total_monitors, total_discharging, monitors_fetched_at, windows_fetched_at, total_hours_by_window, waterways: (.waterways // [] | .[0:3])}'
+
+          echo ""
+          echo "## Live /debug-cache response right now"
+          curl -sf "https://thames-water-cso-dashboard.onrender.com/debug-cache?cachebust=$(date +%s)-3" || echo "(debug-cache not available yet on live deploy)"
