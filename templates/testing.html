@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Testing — Thames Water CSO Dashboard and E coli</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+</head>
+<body>
+{% include "_nav.html" with context %}
+<main>
+  <div class="section-title">Latest readings</div>
+  <table style="margin-bottom:28px;">
+    <thead>
+      <tr>
+        <th>Testing site</th>
+        <th class="num">Latest E coli reading</th>
+        <th>Date of reading</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for key, label in [('frbc', 'FRBC'), ('ptrc', 'PTRC')] %}
+      {% set site = water_quality[key] %}
+      <tr>
+        <td>{{ label }}</td>
+        {% if site and site.latest.available %}
+        <td class="num"><span class="hours-value {{ 'active' if site.latest.risk == 'poor' else ('tunnel' if site.latest.risk == 'good' else 'zero') }}">{{ site.latest.ecoli_str }} CFU/100ml</span></td>
+        <td>{{ site.latest.date_str }} ({{ site.latest.days_ago_str }})</td>
+        {% else %}
+        <td class="num" style="color:var(--text-muted);">&mdash;</td>
+        <td style="color:var(--text-muted);">unavailable</td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% for key, label in [('frbc', 'FRBC'), ('ptrc', 'PTRC')] %}
+  <div class="section-title">{{ label }} &mdash; E coli readings, last 12 months</div>
+  {% if chart_data[key] %}
+  <div class="chart-card">
+    <canvas id="chart-{{ key }}" height="90"></canvas>
+  </div>
+  {% else %}
+  <p style="color:var(--text-muted); font-size:0.85rem;">No readings in the last 12 months.</p>
+  {% endif %}
+  {% endfor %}
+</main>
+<footer>
+  E coli readings sourced from participating testing sites' own published data &middot; refreshed {{ water_quality_fetched_at }}
+</footer>
+<script>
+  const CHART_DATA = {{ chart_data | tojson }};
+  const SITE_LABELS = {frbc: 'FRBC', ptrc: 'PTRC'};
+
+  Object.keys(CHART_DATA).forEach(function (key) {
+    const points = CHART_DATA[key];
+    if (!points || !points.length) return;
+    const canvas = document.getElementById('chart-' + key);
+    if (!canvas) return;
+
+    new Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: {
+        labels: points.map(function (p) { return p.date; }),
+        datasets: [{
+          label: SITE_LABELS[key] + ' E coli (CFU/100ml)',
+          data: points.map(function (p) { return p.ecoli; }),
+          borderColor: '#d03b3b',
+          backgroundColor: 'rgba(208,59,59,0.12)',
+          pointBackgroundColor: '#d03b3b',
+          pointRadius: 3,
+          tension: 0.15,
+          fill: true,
+        }],
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              title: function (items) { return items[0].label; },
+              label: function (item) {
+                return SITE_LABELS[key] + ': ' + item.formattedValue + ' CFU/100ml';
+              },
+            },
+          },
+        },
+        scales: {
+          x: { ticks: { maxRotation: 45, minRotation: 45 } },
+          y: { beginAtZero: true, title: { display: true, text: 'CFU/100ml' } },
+        },
+      },
+    });
+  });
+</script>
+</body>
+</html>

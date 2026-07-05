@@ -3,43 +3,61 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Thames Water CSO Dashboard</title>
+  <title>Thames Water CSO Dashboard and E coli</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
 {% include "_nav.html" with context %}
 <main>
-  <div class="stat-row">
-    {% for win in windows %}
-    <div class="stat-tile">
-      <div class="value" style="color:var(--status-critical);">{{ total_hours_by_window[win.key] }}</div>
-      <div class="label">Total discharge into rivers &mdash; {{ win.label }}</div>
-    </div>
-    {% endfor %}
-  </div>
-  <p style="color:var(--text-muted); font-size:0.8rem; margin:-14px 0 24px;">
-    Excludes discharge routed to the Tideway Tunnel (captured, not released to a river) &mdash; tracked separately below.
+  <div class="section-title">Water quality &mdash; latest E coli readings</div>
+  <table style="margin-bottom:28px;">
+    <thead>
+      <tr>
+        <th>Testing site</th>
+        <th class="num">Latest E coli reading</th>
+        <th>Date of reading</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for key, label in [('frbc', 'FRBC'), ('ptrc', 'PTRC')] %}
+      {% set site = water_quality[key] %}
+      <tr>
+        <td>{{ label }}</td>
+        {% if site and site.latest.available %}
+        <td class="num"><span class="hours-value {{ 'active' if site.latest.risk == 'poor' else ('tunnel' if site.latest.risk == 'good' else 'zero') }}">{{ site.latest.ecoli_str }} CFU/100ml</span></td>
+        <td>{{ site.latest.date_str }} ({{ site.latest.days_ago_str }})</td>
+        {% else %}
+        <td class="num" style="color:var(--text-muted);">&mdash;</td>
+        <td style="color:var(--text-muted);">unavailable</td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p style="color:var(--text-muted); font-size:0.8rem; margin:-18px 0 24px;">
+    Full reading history and trend charts on the <a href="/testing">Testing</a> page.
   </p>
 
-  <div class="section-title">Discharge hours by receiving watercourse</div>
+  <div class="section-title">Discharge hours, total, via Tideway Tunnel and by receiving watercourse.</div>
   <table>
     <thead>
       <tr>
-        <th>Receiving watercourse</th>
+        <th></th>
         {% for win in windows %}
         <th class="num">Discharge ({{ win.key }})</th>
         {% endfor %}
       </tr>
     </thead>
     <tbody>
-      {% for w in waterways[:15] %}
+      {% for w in waterways[:17] %}
       {% set is_tunnel_row = w.name == 'Tideway Tunnel' %}
+      {% set is_subtotal_row = w.name == 'Total discharges into waterways' %}
       <tr class="{{ 'tunnel-row' if is_tunnel_row else '' }}">
-        <td>{{ w.name }}{% if is_tunnel_row %} <span style="color:var(--status-good); font-size:0.8em;">(captured)</span>{% endif %}</td>
+        <td{% if is_subtotal_row %} style="font-weight:600;"{% endif %}>{{ w.name }}{% if is_tunnel_row %} <span style="color:var(--status-good); font-size:0.8em;">(captured)</span>{% endif %}</td>
         {% for win in windows %}
         {% set val = w.hours_by_window[win.key] %}
         <td class="num">
-          <span class="hours-value {{ 'tunnel' if is_tunnel_row else ('zero' if val == '0h 00m' else 'active') }}">{{ val }}</span>
+          <span class="hours-value {{ 'tunnel' if is_tunnel_row else ('zero' if val == '0h 00m' else 'active') }}"{% if is_subtotal_row %} style="font-weight:600;"{% endif %}>{{ val }}</span>
         </td>
         {% endfor %}
       </tr>
@@ -49,7 +67,8 @@
 </main>
 <footer>
   Source: <a href="https://docs.api.thameswater.co.uk/" target="_blank">Thames Water Open Data API v2</a> (discharge/status, discharge/alerts) &middot;
-  Monitor list refreshed {{ monitors_fetched_at }} &middot; Discharge durations ({{ default_window }}) refreshed {{ windows_fetched_at }}
+  Monitor list refreshed {{ monitors_fetched_at }} &middot; Discharge durations ({{ default_window }}) refreshed {{ windows_fetched_at }} &middot;
+  Water quality refreshed {{ water_quality_fetched_at }}
 </footer>
 </body>
 </html>

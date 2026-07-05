@@ -12,59 +12,99 @@
 {% include "_nav.html" with context %}
 <main>
   <p style="color:var(--text-secondary); font-size:0.85rem; margin:0 0 10px;">
-    Marker colour = receiving watercourse. Larger, brighter markers are currently discharging. Hover a marker for full details.
+    Marker colour = receiving watercourse, with the Tideway Tunnel shown as its own category. Larger, brighter markers are currently discharging. Hover a marker for full details. Use the legend to switch categories on or off.
   </p>
   <div id="map"></div>
-  <p style="color:var(--text-muted); font-size:0.8rem; margin-top:8px;">
-    Tunnel-connection flag is inferred from the API's own receivingWaterCourse text
-    ("via the Tideway tunnel") rather than manually verified per site — it hasn't
-    been cross-checked against Thames Water's site-by-site FAQ pages the way the
-    sister frbc-tides project does for its ~70 curated Hammersmith-area monitors,
-    since that doesn't scale to a full national list.
-  </p>
+  <div class="legend" id="map-legend"></div>
 </main>
 <footer>
   {{ total_monitors }} monitors plotted &middot; refreshed {{ monitors_fetched_at }}
 </footer>
 <script>
   const stations = {{ stations | tojson }};
-  const map = L.map('map').setView([52.0, -1.2], 6);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  const map = L.map('map');
+  map.fitBounds([[50.0, -5.8], [52.05, 1.5]]);   // default view: South of England
+
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
     attribution: '&copy; OpenStreetMap &copy; CARTO',
     subdomains: 'abcd',
     maxZoom: 19,
   }).addTo(map);
 
-  function colorForWater(name) {
+  const TUNNEL_CATEGORY = 'Tideway Tunnel';
+  const TUNNEL_COLOUR = '#0ca30c';
+
+  function colorForCategory(name) {
+    if (name === TUNNEL_CATEGORY) return TUNNEL_COLOUR;
     let hash = 0;
     for (let i = 0; i < name.length; i++) {
       hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
     }
-    return 'hsl(' + (hash % 360) + ', 65%, 45%)';
+    return 'hsl(' + (hash % 360) + ', 65%, 42%)';
   }
+
+  const layersByCategory = {};
+  const countsByCategory = {};
 
   stations.forEach(function (s) {
     if (s.lat == null || s.lon == null) return;
-    const color = colorForWater(s.water || 'Unknown');
+    const category = s.map_category || s.water || 'Unknown';
+    const color = colorForCategory(category);
+    countsByCategory[category] = (countsByCategory[category] || 0) + 1;
+
     const marker = L.circleMarker([s.lat, s.lon], {
       radius: s.is_discharging ? 7 : 4,
       color: color,
       fillColor: color,
       fillOpacity: s.is_discharging ? 0.9 : 0.55,
       weight: 1,
-    }).addTo(map);
-    const tunnel = s.tunnel_connected_inferred ? '<div style="color:#3987e5;">Tideway tunnel-connected (inferred)</div>' : '';
+    });
+
     marker.bindTooltip(
       '<div style="font-weight:600;">' + s.name + '</div>' +
-      '<div>' + s.water + '</div>' +
+      '<div>' + category + '</div>' +
       '<div>Status: ' + s.status + '</div>' +
       '<div>Discharge 24h: ' + s.hours_by_window['24h'] + '</div>' +
       '<div>Discharge 7d: ' + s.hours_by_window['7d'] + '</div>' +
       '<div>Discharge 30d: ' + s.hours_by_window['30d'] + '</div>' +
-      tunnel +
+      '<div>Last discharge: ' + s.last_discharge_str + '</div>' +
       '<div style="color:#888; font-size:0.85em; margin-top:4px;">' + s.permit + '</div>',
       { sticky: true, direction: 'top', opacity: 0.95, className: 'cso-tooltip' }
     );
+
+    if (!layersByCategory[category]) layersByCategory[category] = L.layerGroup();
+    marker.addTo(layersByCategory[category]);
+  });
+
+  const categoriesSorted = Object.keys(layersByCategory).sort(function (a, b) {
+    if (a === TUNNEL_CATEGORY) return -1;
+    if (b === TUNNEL_CATEGORY) return 1;
+    return (countsByCategory[b] || 0) - (countsByCategory[a] || 0);
+  });
+
+  categoriesSorted.forEach(function (category) {
+    layersByCategory[category].addTo(map);
+  });
+
+  const legend = document.getElementById('map-legend');
+  categoriesSorted.forEach(function (category) {
+    const row = document.createElement('div');
+    row.className = 'legend-row';
+    row.innerHTML =
+      '<span class="legend-swatch" style="background:' + colorForCategory(category) + ';"></span>' +
+      '<span>' + category + '</span>' +
+      '<span class="legend-count">(' + countsByCategory[category] + ')</span>';
+    row.addEventListener('click', function () {
+      const layer = layersByCategory[category];
+      if (map.hasLayer(layer)) {
+        map.removeLayer(layer);
+        row.classList.add('off');
+      } else {
+        layer.addTo(map);
+        row.classList.remove('off');
+      }
+    });
+    legend.appendChild(row);
   });
 </script>
 </body>

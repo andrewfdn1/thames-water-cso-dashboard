@@ -1,7 +1,12 @@
 from flask import Flask, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from collections import defaultdict
+from io import StringIO
+from urllib.request import urlopen
+from urllib.error import URLError, HTTPError
+import csv
+import re
 import requests
 import threading
 import traceback
@@ -176,12 +181,37 @@ def _bng_to_wgs84(easting, northing):
         return None
 
 
+# Hammersmith Bridge — same reference point the sister frbc-tides project
+# uses, so "upstream"/"downstream" and distance groupings on the monitors
+# page are consistent with how that project already describes the river.
+_HAMMERSMITH_LAT, _HAMMERSMITH_LON = 51.488, -0.224
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
 def _fmt_hrs(seconds):
     if seconds <= 0:
         return "0h 00m"
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     return f"{h}h {m:02d}m"
+
+
+def _fmt_last_discharge(info):
+    if not info:
+        return "No discharge in last 30 days"
+    start_str = info["start"].strftime("%d %b %H:%M")
+    if info["end"] is None:
+        return f"Ongoing since {start_str} UTC"
+    end_str = info["end"].strftime("%d %b %H:%M")
+    return f"{start_str}–{end_str} UTC"
 
 
 def _normalise_watercourse(name):
@@ -298,20 +328,35 @@ def get_discharge_windows():
             return secs
 
         windows = {w["key"]: secs_for_window(w["hours"]) for w in _WINDOWS}
+
+        # Most recent interval per permit within the lookback window, for map
+        # hover detail. "end" is None while the discharge is still ongoing
+        # (no matching Stop event found, so the interval was clipped to now).
+        last_discharge = {}
+        for permit, start_dt, stop_dt in intervals:
+            prev = last_discharge.get(permit)
+            if prev is None or start_dt > prev["start"]:
+                last_discharge[permit] = {
+                    "start": start_dt,
+                    "end": None if stop_dt >= now_utc else stop_dt,
+                }
+
         print(
             f"discharge windows computed: {len(intervals)} intervals, "
             + ", ".join(f"{k}={len(v)} permits" for k, v in windows.items())
         )
-        return windows
+        return {"windows": windows, "last_discharge": last_discharge}
 
     return get_cached("discharge_windows", fetch, ttl_seconds=1800)
 
 
 def build_dataset():
     monitors, monitors_fetched_at = get_all_monitors()
-    secs_by_window, windows_fetched_at = get_discharge_windows()
+    windows_data, windows_fetched_at = get_discharge_windows()
     monitors = monitors or {}
-    secs_by_window = secs_by_window or {w["key"]: {} for w in _WINDOWS}
+    windows_data = windows_data or {"windows": {w["key"]: {} for w in _WINDOWS}, "last_discharge": {}}
+    secs_by_window = windows_data["windows"]
+    last_discharge = windows_data["last_discharge"]
 
     stations = []
     by_water_secs = defaultdict(lambda: {w["key"]: 0.0 for w in _WINDOWS})
@@ -339,21 +384,39 @@ def build_dataset():
             **m,
             "hours_by_window": {k: _fmt_hrs(v) for k, v in secs.items()},
             "is_discharging": is_discharging,
+            # Map colour category: tunnel-connected sites get their own
+            # category regardless of nominal receiving watercourse, so
+            # they're visually distinct rather than blending into "River
+            # Thames" on the map.
+            "map_category": "Tideway Tunnel" if m["tunnel_connected_inferred"] else m["water"],
+            "last_discharge_str": _fmt_last_discharge(last_discharge.get(permit)),
         })
 
     stations.sort(key=lambda s: (not s["is_discharging"], s["name"]))
 
-    waterways = [
+    non_tunnel_waterways = [
         {"name": name, "hours_by_window": {k: _fmt_hrs(v) for k, v in secs.items()}}
         for name, secs in sorted(
             by_water_secs.items(),
             key=lambda item: tuple(-item[1][w["key"]] for w in _WINDOWS),
         )
     ]
-    waterways.insert(0, {
-        "name": "Tideway Tunnel",
-        "hours_by_window": {k: _fmt_hrs(v) for k, v in tunnel_secs.items()},
-    })
+    thames_row = next((w for w in non_tunnel_waterways if w["name"] == "River Thames"), None)
+    other_rows = [w for w in non_tunnel_waterways if w["name"] != "River Thames"]
+
+    # Table row order: Tideway Tunnel (captured, own bucket) — Total
+    # discharges into waterways (every non-tunnel permit, so Tideway Tunnel
+    # is never double-counted here) — River Thames pulled out for
+    # prominence — then remaining tributaries, busiest first.
+    waterways = [
+        {"name": "Tideway Tunnel", "hours_by_window": {k: _fmt_hrs(v) for k, v in tunnel_secs.items()}},
+        {"name": "Total discharges into waterways", "hours_by_window": {k: _fmt_hrs(v) for k, v in total_secs.items()}},
+    ]
+    if thames_row:
+        waterways.append(thames_row)
+    waterways.extend(other_rows)
+
+    water_quality, water_quality_fetched_at = get_water_quality()
 
     return {
         "stations":          stations,
@@ -365,7 +428,235 @@ def build_dataset():
         "total_hours_by_window": {k: _fmt_hrs(v) for k, v in total_secs.items()},
         "monitors_fetched_at": monitors_fetched_at,
         "windows_fetched_at":  windows_fetched_at,
+        "water_quality":            water_quality or {"frbc": None, "ptrc": None},
+        "water_quality_fetched_at": water_quality_fetched_at,
     }
+
+
+def build_monitor_groups(stations):
+    """Group stations for the All Monitors page: Tideway Tunnel CSOs first,
+    River Thames second, then each remaining tributary as its own group,
+    ordered by distance from Hammersmith Bridge (nearest first) with an
+    upstream/downstream subheading — determined by whether the tributary's
+    nearest monitor sits west (upstream) or east (downstream) of Hammersmith's
+    longitude, the same simplification the sister frbc-tides project uses
+    for its own Thames-side grouping."""
+    def sort_key(s):
+        return (not s["is_discharging"], s["name"])
+
+    tunnel = sorted((s for s in stations if s["tunnel_connected_inferred"]), key=sort_key)
+    thames = sorted(
+        (s for s in stations if not s["tunnel_connected_inferred"] and s["water"] == "River Thames"),
+        key=sort_key,
+    )
+
+    other_by_water = defaultdict(list)
+    for s in stations:
+        if s["tunnel_connected_inferred"] or s["water"] == "River Thames":
+            continue
+        other_by_water[s["water"]].append(s)
+
+    def nearest_and_distance(members):
+        coord_members = [s for s in members if s["lat"] is not None and s["lon"] is not None]
+        if not coord_members:
+            return None, float("inf")
+        nearest = min(
+            coord_members,
+            key=lambda s: _haversine_km(s["lat"], s["lon"], _HAMMERSMITH_LAT, _HAMMERSMITH_LON),
+        )
+        return nearest, _haversine_km(nearest["lat"], nearest["lon"], _HAMMERSMITH_LAT, _HAMMERSMITH_LON)
+
+    tributary_groups = []
+    for water, members in other_by_water.items():
+        nearest, distance_km = nearest_and_distance(members)
+        if nearest is None:
+            subheading = "location unknown"
+        elif nearest["lon"] < _HAMMERSMITH_LON:
+            subheading = "upstream of Hammersmith"
+        else:
+            subheading = "downstream of Hammersmith"
+        tributary_groups.append({
+            "name": water,
+            "subheading": subheading,
+            "stations": sorted(members, key=sort_key),
+            "_distance": distance_km,
+        })
+    tributary_groups.sort(key=lambda g: g["_distance"])
+    for g in tributary_groups:
+        del g["_distance"]
+
+    groups = []
+    if tunnel:
+        groups.append({"name": "Tideway Tunnel CSO", "subheading": None, "stations": tunnel})
+    if thames:
+        groups.append({"name": "River Thames", "subheading": None, "stations": thames})
+    groups.extend(tributary_groups)
+    return groups
+
+
+# ---------------------------------------------------------------------------
+# Water quality — E. coli readings from participating testing sites'
+# Google Sheets (FRBC / PTRC), same public-CSV-export data source and sheet
+# layout already used by the sister frbc-tides project.
+# ---------------------------------------------------------------------------
+
+_WQ_FRBC_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1ZAzKgnACVxEM3j9eToxE9oAJpu6KZN0BNaeXd0jUmyM"
+    "/export?format=csv&gid=1799951970"
+)
+_WQ_PTRC_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "14i4LMVw5OA1NvE8i14cbGo8M6nnUVlFV1pRbpjMmYnA"
+    "/export?format=csv&gid=132413204"
+)
+_WQ_ECOLI_GOOD   = 1_000    # CFU/100ml — at/below this is shown as good (green)
+_WQ_STALE_DAYS   = 7
+_WQ_HISTORY_DAYS = 365      # Testing page chart window
+
+
+def _wq_parse_ecoli(raw):
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    if raw.lower() in ("", "void", "na", "n/a", "-"):
+        return None
+    m = re.search(r"\((\d[\d,]*)\)", raw)
+    if m:
+        return int(m.group(1).replace(",", ""))
+    d = re.search(r"[\d,]+", raw)
+    if d:
+        try:
+            return int(d.group(0).replace(",", ""))
+        except ValueError:
+            return None
+    return None
+
+
+def _wq_parse_date(raw):
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _wq_risk(ecoli_value, stale=False):
+    if stale or ecoli_value is None:
+        return "unknown"
+    return "good" if ecoli_value <= _WQ_ECOLI_GOOD else "poor"
+
+
+def _wq_find_col(keys, *candidates):
+    for c in candidates:
+        for k in keys:
+            if c.lower() in k.lower():
+                return k
+    return None
+
+
+def _wq_parse_sheet(raw_csv, site_label):
+    """Parse a testing site's Google Sheet export into a full, date-sorted
+    reading history. Column detection (rather than a fixed column name)
+    because the two sheets don't share exactly the same headers."""
+    reader = csv.DictReader(StringIO(raw_csv))
+    rows = [{k.strip(): v.strip() for k, v in row.items() if k} for row in reader]
+    if not rows:
+        return []
+    keys = list(rows[0].keys())
+
+    ecoli_col = None
+    for k in keys:
+        kl = k.lower()
+        if "e.coli" in kl or "ecoli" in kl or "e coli" in kl or "alert one" in kl:
+            if "additional" not in kl and "monitor 2" not in kl and "monitor 3" not in kl:
+                ecoli_col = k
+                break
+    if not ecoli_col:
+        print(f"WARNING [wq/{site_label}]: no E. coli column found")
+        return []
+
+    date_col = _wq_find_col(keys, "sample date", "date")
+    results = []
+    for row in rows:
+        ecoli_val = _wq_parse_ecoli(row.get(ecoli_col, ""))
+        sample_date = _wq_parse_date(row.get(date_col, "") if date_col else "")
+        if sample_date is None and ecoli_val is None:
+            continue
+        d_ago = (date.today() - sample_date).days if sample_date else None
+        stale = d_ago is not None and d_ago > _WQ_STALE_DAYS
+        results.append({
+            "date":     sample_date.isoformat() if sample_date else None,
+            "date_str": sample_date.strftime("%-d %b %Y") if sample_date else "—",
+            "days_ago": d_ago,
+            "stale":    stale,
+            "ecoli":    ecoli_val,
+            "risk":     _wq_risk(ecoli_val, stale=stale),
+        })
+    results.sort(key=lambda r: r["date"] or "", reverse=True)
+    return results
+
+
+def _wq_fetch_site(url, site_label):
+    if not url:
+        return []
+    try:
+        with urlopen(url, timeout=15) as resp:
+            return _wq_parse_sheet(resp.read().decode("utf-8"), site_label)
+    except HTTPError as e:
+        if e.code == 403:
+            # Sheet genuinely not public — real "no data", not transient.
+            print(f"INFO [wq/{site_label}]: sheet not public (403)")
+            return []
+        print(f"ERROR [wq/{site_label}]: HTTP {e.code} {e.reason}")
+        raise
+    except URLError as e:
+        print(f"ERROR [wq/{site_label}]: {e}")
+        raise
+
+
+def get_water_quality():
+    """E. coli readings for each testing site. Cached 6h (sheets are updated
+    roughly weekly). Returns per-site full history (Testing page chart) plus
+    a pre-formatted 'latest' summary (Summary page table)."""
+    def fetch_one(label, url):
+        rows = _wq_fetch_site(url, label)
+        latest = next((r for r in rows if r["ecoli"] is not None), None)
+        if latest:
+            d = latest["days_ago"]
+            if d == 0:
+                days_str = "today"
+            elif d == 1:
+                days_str = "yesterday"
+            elif d is not None:
+                days_str = f"{d} days ago"
+            else:
+                days_str = "date unknown"
+            latest_summary = {
+                "ecoli_str":    f"{latest['ecoli']:,}",
+                "date_str":     latest["date_str"],
+                "days_ago_str": days_str,
+                "risk":         latest["risk"],
+                "available":    True,
+            }
+        else:
+            latest_summary = {
+                "ecoli_str": "—", "date_str": "—", "days_ago_str": "unavailable",
+                "risk": "unknown", "available": False,
+            }
+        return {"history": rows, "latest": latest_summary}
+
+    def fetch():
+        return {
+            "frbc": fetch_one("FRBC", _WQ_FRBC_URL),
+            "ptrc": fetch_one("PTRC", _WQ_PTRC_URL),
+        }
+
+    return get_cached("water_quality", fetch, ttl_seconds=21600)
 
 
 @app.route("/")
@@ -383,7 +674,37 @@ def map_view():
 @app.route("/monitors")
 def monitors_view():
     data = build_dataset()
+    data["groups"] = build_monitor_groups(data["stations"])
     return render_template("monitors.html", **data)
+
+
+@app.route("/testing")
+def testing_view():
+    water_quality, water_quality_fetched_at = get_water_quality()
+    water_quality = water_quality or {"frbc": None, "ptrc": None}
+
+    cutoff = (date.today() - timedelta(days=_WQ_HISTORY_DAYS)).isoformat()
+    chart_data = {}
+    for key, site in water_quality.items():
+        if not site:
+            chart_data[key] = []
+            continue
+        points = sorted(
+            (
+                {"date": r["date"], "ecoli": r["ecoli"]}
+                for r in site["history"]
+                if r["ecoli"] is not None and r["date"] and r["date"] >= cutoff
+            ),
+            key=lambda p: p["date"],
+        )
+        chart_data[key] = points
+
+    return render_template(
+        "testing.html",
+        water_quality=water_quality,
+        water_quality_fetched_at=water_quality_fetched_at,
+        chart_data=chart_data,
+    )
 
 
 @app.route("/data")

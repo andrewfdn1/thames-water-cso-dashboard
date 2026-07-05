@@ -1,9 +1,11 @@
 <header>
-  <h1>Thames Water CSO Dashboard</h1>
-  <p class="subtitle">Every Combined Sewer Overflow / EDM monitor Thames Water's Open Data API reports nationally — live status and discharge duration.</p>
+  <h1>Thames Water CSO Dashboard and E coli</h1>
+  <p class="subtitle">Every Combined Sewer Overflow (CSO) with Event Duration Monitoring (EDM) from Thames Water's Open Data API nationally.</p>
+  <p class="subtitle">E coli testing results from participating stakeholders.</p>
   <nav class="tabs">
     <a href="/" class="{{ 'active' if active == 'summary' else '' }}">Summary</a>
     <a href="/map" class="{{ 'active' if active == 'map' else '' }}">Map</a>
     <a href="/monitors" class="{{ 'active' if active == 'monitors' else '' }}">All monitors</a>
+    <a href="/testing" class="{{ 'active' if active == 'testing' else '' }}">Testing</a>
   </nav>
 </header>
