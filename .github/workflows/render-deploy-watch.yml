@@ -74,6 +74,10 @@ jobs:
           fi
 
           echo ""
+          echo "## Live /data response headers (checking for CDN/proxy caching)"
+          curl -sI "https://thames-water-cso-dashboard.onrender.com/data?cachebust=$(date +%s)" || true
+
+          echo ""
           echo "## Live /data response right now"
-          live_json=$(curl -sf "https://thames-water-cso-dashboard.onrender.com/data" || echo '{}')
+          live_json=$(curl -sf "https://thames-water-cso-dashboard.onrender.com/data?cachebust=$(date +%s)-2" || echo '{}')
           echo "$live_json" | jq '{total_monitors, total_discharging, monitors_fetched_at, windows_fetched_at, total_hours_by_window, waterways: (.waterways // [] | .[0:3])}'
