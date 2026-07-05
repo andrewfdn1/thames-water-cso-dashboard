@@ -1,0 +1,81 @@
+name: Thames Water discharge/alerts history range test
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  test-range:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Test progressively larger discharge/alerts date ranges
+        run: |
+          python3 - <<'PYEOF'
+          import requests, time
+          from datetime import datetime, timezone, timedelta
+
+          BASE = "https://api.thameswater.co.uk/opendata/v2/discharge"
+          HEADERS = {"User-Agent": "Mozilla/5.0"}
+          PAGE_LIMIT = 200
+
+          def fetch_all_pages(url, params, max_pages=500):
+              items = []
+              offset = 0
+              page_count = 0
+              errors = []
+              while page_count < max_pages:
+                  page_params = dict(params, limit=PAGE_LIMIT, offset=offset)
+                  resp = None
+                  for attempt in range(3):
+                      resp = requests.get(url, params=page_params, headers=HEADERS, timeout=30)
+                      if resp.status_code == 429:
+                          time.sleep(2 ** attempt)
+                          continue
+                      break
+                  if resp.status_code != 200:
+                      errors.append(f"HTTP {resp.status_code} at offset {offset}: {resp.text[:200]!r}")
+                      break
+                  page = resp.json().get("items", [])
+                  items.extend(page)
+                  page_count += 1
+                  if len(page) < PAGE_LIMIT:
+                      break
+                  offset += PAGE_LIMIT
+                  time.sleep(1)
+              return items, page_count, errors
+
+          now_utc = datetime.now(timezone.utc)
+          date_end = now_utc.strftime("%Y-%m-%d")
+
+          # Test progressively larger windows. Only alertType=Start, to roughly
+          # halve request volume vs a real Start+Stop pull -- we're testing
+          # whether/how far back the endpoint will go, not computing real
+          # discharge totals here.
+          test_days = [30, 60, 90, 180, 270, 365, 545]  # up to ~18 months
+
+          print("## Testing discharge/alerts (alertType=Start) at increasing date ranges")
+          print(f"{'days':>6} {'date_start':>12}  {'items':>7} {'pages':>6} {'elapsed_s':>10}  notes")
+          for days in test_days:
+              date_start = (now_utc - timedelta(days=days)).strftime("%Y-%m-%d")
+              params = {"dateStart": date_start, "dateEnd": date_end, "alertType": "Start"}
+              t0 = time.time()
+              items, pages, errors = fetch_all_pages(BASE + "/alerts", params)
+              elapsed = time.time() - t0
+              earliest = min((i.get("datetime", "") for i in items), default="")
+              note = f"errors={errors}" if errors else f"earliest_returned={earliest}"
+              print(f"{days:>6} {date_start:>12}  {len(items):>7} {pages:>6} {elapsed:>10.1f}  {note}")
+              time.sleep(2)
+              if errors:
+                  print(f"    -> stopping further/larger tests after first error at {days} days")
+                  break
+
+          print()
+          print("## Done. Compare 'items' growth vs 'days' growth -- if items stops")
+          print("## growing while days keeps increasing, that's the API's real history limit.")
+          PYEOF
