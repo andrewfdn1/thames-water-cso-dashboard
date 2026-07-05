@@ -271,11 +271,6 @@ a { color: inherit; }
   color: var(--text-primary);
 }
 
-#legend-rows {
-  max-height: 220px;
-  overflow-y: auto;
-}
-
 .legend-row {
   display: flex;
   align-items: center;
