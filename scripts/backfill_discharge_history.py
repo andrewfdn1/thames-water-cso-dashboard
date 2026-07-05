@@ -136,23 +136,27 @@ def fetch_all_pages(url, params):
 
 
 def fetch_chunk(params, max_attempts=3):
-    """Fetch a chunk's Start+Stop events, retrying the whole chunk if both
-    come back completely empty. Confirmed in practice (2026-06-12..2026-07-05
-    initially came back as 0+0 during a long backfill run, then 259+24 and
-    24+24 on immediate re-check) that this API can return a valid HTTP 200
-    with zero items under sustained request load, which a single-shot fetch
-    can't distinguish from a genuinely quiet period. Only retries when the
-    result is suspiciously all-zero, so a normal chunk costs nothing extra."""
+    """Fetch a chunk's Start+Stop events, retrying the whole chunk unless
+    BOTH come back non-empty. Confirmed in practice that this API can
+    return a valid HTTP 200 with zero items under sustained request load,
+    which a single-shot fetch can't distinguish from a genuinely quiet
+    period -- including asymmetric cases (one real run recorded 1200
+    starts but 0 stops for the same window), which is just as suspicious
+    given the API's own documented behaviour that a Start is always
+    eventually followed by a Stop. Only retries when at least one side
+    came back empty, so a normal, fully-populated chunk costs nothing
+    extra."""
     starts, stops, total_pages = [], [], 0
     for attempt in range(1, max_attempts + 1):
         starts, start_pages = fetch_all_pages(BASE + "/alerts", dict(params, alertType="Start"))
         time.sleep(1)
         stops, stop_pages = fetch_all_pages(BASE + "/alerts", dict(params, alertType="Stop"))
         total_pages = start_pages + stop_pages
-        if starts or stops or attempt == max_attempts:
+        if (starts and stops) or attempt == max_attempts:
             return starts, stops, total_pages
         print(
-            f"    zero results for {params['dateStart']}..{params['dateEnd']} "
+            f"    incomplete result ({len(starts)} starts, {len(stops)} stops) for "
+            f"{params['dateStart']}..{params['dateEnd']} "
             f"(attempt {attempt}/{max_attempts}) -- retrying after a pause, in case "
             f"this is the API returning an empty response under load rather than a "
             f"genuinely quiet period"
