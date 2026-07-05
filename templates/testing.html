@@ -35,10 +35,13 @@
       {% endfor %}
     </tbody>
   </table>
+  <p style="color:var(--text-muted); font-size:0.8rem; margin:-18px 0 24px;">
+    Each chart also overlays total national discharge hours per week (excluding the Tideway Tunnel) on the right-hand axis, for the same period.
+  </p>
 
   {% for key, label in [('frbc', 'FRBC'), ('ptrc', 'PTRC')] %}
-  <div class="section-title">{{ label }} &mdash; E coli readings, last 12 months</div>
-  {% if chart_data[key] %}
+  <div class="section-title">{{ label }} &mdash; E coli readings and total discharge, last 12 months</div>
+  {% if chart_has_data[key] %}
   <div class="chart-card">
     <canvas id="chart-{{ key }}" height="90"></canvas>
   </div>
@@ -48,49 +51,75 @@
   {% endfor %}
 </main>
 <footer>
-  E coli readings sourced from participating testing sites' own published data &middot; refreshed {{ water_quality_fetched_at }}
+  E coli readings sourced from participating testing sites' own published data, refreshed {{ water_quality_fetched_at }} &middot;
+  Discharge history refreshed {{ discharge_fetched_at }}
 </footer>
 <script>
+  const WEEK_LABELS = {{ week_labels | tojson }};
   const CHART_DATA = {{ chart_data | tojson }};
+  const DISCHARGE_HOURS = {{ discharge_hours | tojson }};
   const SITE_LABELS = {frbc: 'FRBC', ptrc: 'PTRC'};
 
   Object.keys(CHART_DATA).forEach(function (key) {
-    const points = CHART_DATA[key];
-    if (!points || !points.length) return;
+    const ecoliValues = CHART_DATA[key];
+    if (!ecoliValues || ecoliValues.every(function (v) { return v === null; })) return;
     const canvas = document.getElementById('chart-' + key);
     if (!canvas) return;
 
     new Chart(canvas.getContext('2d'), {
       type: 'line',
       data: {
-        labels: points.map(function (p) { return p.date; }),
-        datasets: [{
-          label: SITE_LABELS[key] + ' E coli (CFU/100ml)',
-          data: points.map(function (p) { return p.ecoli; }),
-          borderColor: '#d03b3b',
-          backgroundColor: 'rgba(208,59,59,0.12)',
-          pointBackgroundColor: '#d03b3b',
-          pointRadius: 3,
-          tension: 0.15,
-          fill: true,
-        }],
+        labels: WEEK_LABELS,
+        datasets: [
+          {
+            label: SITE_LABELS[key] + ' E coli (CFU/100ml)',
+            data: ecoliValues,
+            borderColor: '#d03b3b',
+            backgroundColor: 'rgba(208,59,59,0.12)',
+            pointBackgroundColor: '#d03b3b',
+            pointRadius: 3,
+            tension: 0.15,
+            fill: true,
+            spanGaps: true,
+            yAxisID: 'y',
+          },
+          {
+            label: 'Total discharge, excl. Tideway Tunnel (hours/week)',
+            data: DISCHARGE_HOURS,
+            borderColor: '#3987e5',
+            backgroundColor: 'rgba(57,135,229,0.08)',
+            pointRadius: 0,
+            borderWidth: 1.5,
+            tension: 0.15,
+            fill: false,
+            yAxisID: 'y1',
+          },
+        ],
       },
       options: {
         responsive: true,
+        interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { display: false },
+          legend: { display: true, position: 'bottom' },
           tooltip: {
             callbacks: {
               title: function (items) { return items[0].label; },
-              label: function (item) {
-                return SITE_LABELS[key] + ': ' + item.formattedValue + ' CFU/100ml';
-              },
             },
           },
         },
         scales: {
           x: { ticks: { maxRotation: 45, minRotation: 45 } },
-          y: { beginAtZero: true, title: { display: true, text: 'CFU/100ml' } },
+          y: {
+            position: 'left',
+            beginAtZero: true,
+            title: { display: true, text: 'CFU/100ml' },
+          },
+          y1: {
+            position: 'right',
+            beginAtZero: true,
+            title: { display: true, text: 'Discharge hours/week' },
+            grid: { drawOnChartArea: false },
+          },
         },
       },
     });

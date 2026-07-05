@@ -812,6 +812,120 @@ def get_water_quality():
     return get_cached("water_quality", fetch, ttl_seconds=_WQ_REFRESH_SECONDS)
 
 
+# ---------------------------------------------------------------------------
+# Total discharge overlay (Testing page) — reads the raw event history
+# backfilled by scripts/backfill_discharge_history.py, aggregated into the
+# same weekly buckets as the E. coli chart so both can share one x-axis.
+# This only reads what's already in discharge_history.db/Turso; nothing in
+# the live app writes to it, so it reflects whatever the backfill/repair
+# script last captured, not a live-updating feed.
+# ---------------------------------------------------------------------------
+
+_DISCHARGE_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "discharge_history.db")
+_CHART_WEEKS = _WQ_HISTORY_DAYS // 7   # 52 weeks to match the E. coli chart window
+
+
+def _week_buckets():
+    """Weekly (start, end) date pairs, end exclusive, oldest first. The most
+    recent bucket ends *tomorrow*, not today -- with an exclusive end date,
+    ending exactly on today would put today's own events outside every
+    bucket, silently dropping the most current data."""
+    end = date.today() + timedelta(days=1)
+    buckets = []
+    for _ in range(_CHART_WEEKS):
+        start = end - timedelta(days=7)
+        buckets.append((start, end))
+        end = start
+    buckets.reverse()
+    return buckets
+
+
+def _load_discharge_intervals():
+    conn = db.connect(_DISCHARGE_DB_PATH, env_prefix="TURSO_DISCHARGE")
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS discharge_events (
+                permit    TEXT NOT NULL,
+                start_utc TEXT NOT NULL,
+                stop_utc  TEXT,
+                PRIMARY KEY (permit, start_utc)
+            )
+        """)
+        rows = conn.execute("SELECT permit, start_utc, stop_utc FROM discharge_events").fetchall()
+    finally:
+        conn.close()
+
+    intervals = []
+    for permit, start_utc, stop_utc in rows:
+        try:
+            start_dt = _parse_dt(start_utc)
+            stop_dt = _parse_dt(stop_utc) if stop_utc else None
+        except ValueError:
+            continue
+        intervals.append((permit, start_dt, stop_dt))
+    return intervals
+
+
+def get_total_discharge_weekly():
+    """Total discharge hours per week, nationally, excluding Tideway Tunnel
+    permits -- same exclusion the Summary page's subtotal already applies.
+    Tunnel classification comes from the *current* monitor list, since a
+    site's tunnel connection is a fixed physical property, not something
+    that changes week to week; a permit retired before today's monitor list
+    won't be classifiable and is conservatively counted as non-tunnel."""
+    def fetch():
+        monitors, _ = get_all_monitors()
+        tunnel_permits = {p for p, m in (monitors or {}).items() if m.get("tunnel_connected_inferred")}
+
+        intervals = _load_discharge_intervals()
+        now_utc = datetime.now(timezone.utc)
+        buckets = _week_buckets()
+        n = len(buckets)
+        secs_by_week = [0.0] * n
+        window_start = datetime.combine(buckets[0][0], datetime.min.time(), tzinfo=timezone.utc)
+
+        for permit, start_dt, stop_dt in intervals:
+            if permit in tunnel_permits:
+                continue
+            effective_stop = stop_dt or now_utc
+            if effective_stop <= window_start:
+                continue
+            start_idx = max(0, (start_dt.date() - buckets[0][0]).days // 7)
+            for i in range(start_idx, n):
+                b_start = datetime.combine(buckets[i][0], datetime.min.time(), tzinfo=timezone.utc)
+                b_end = datetime.combine(buckets[i][1], datetime.min.time(), tzinfo=timezone.utc)
+                if b_start >= effective_stop:
+                    break
+                clipped_start = max(start_dt, b_start)
+                clipped_stop = min(effective_stop, b_end)
+                if clipped_stop > clipped_start:
+                    secs_by_week[i] += (clipped_stop - clipped_start).total_seconds()
+
+        return {
+            "week_starts": [b[0].isoformat() for b in buckets],
+            "hours":       [round(s / 3600, 2) for s in secs_by_week],
+        }
+
+    return get_cached("total_discharge_weekly", fetch, ttl_seconds=_WQ_REFRESH_SECONDS)
+
+
+def _bucket_ecoli_readings(history, buckets):
+    """Align a site's E. coli readings onto the same weekly buckets used for
+    the discharge overlay, so both series share one x-axis. Readings are
+    normally about weekly already, so this is mostly a 1:1 mapping; a week
+    with no reading gets None (a gap in the line, not a zero)."""
+    values = [None] * len(buckets)
+    for r in history:
+        if r["ecoli"] is None or not r["date"]:
+            continue
+        d = date.fromisoformat(r["date"])
+        for i, (b_start, b_end) in enumerate(buckets):
+            if b_start <= d < b_end:
+                values[i] = r["ecoli"]
+                break
+    return values
+
+
 @app.route("/")
 def index():
     data = build_dataset()
@@ -836,27 +950,28 @@ def testing_view():
     water_quality, water_quality_fetched_at = get_water_quality()
     water_quality = water_quality or {"frbc": None, "ptrc": None}
 
-    cutoff = (date.today() - timedelta(days=_WQ_HISTORY_DAYS)).isoformat()
+    buckets = _week_buckets()
+    week_labels = [b[0].strftime("%-d %b") for b in buckets]
+
+    discharge_weekly, discharge_fetched_at = get_total_discharge_weekly()
+    discharge_hours = (discharge_weekly or {}).get("hours") or [0] * len(buckets)
+
     chart_data = {}
+    chart_has_data = {}
     for key, site in water_quality.items():
-        if not site:
-            chart_data[key] = []
-            continue
-        points = sorted(
-            (
-                {"date": r["date"], "ecoli": r["ecoli"]}
-                for r in site["history"]
-                if r["ecoli"] is not None and r["date"] and r["date"] >= cutoff
-            ),
-            key=lambda p: p["date"],
-        )
-        chart_data[key] = points
+        values = _bucket_ecoli_readings(site["history"], buckets) if site else [None] * len(buckets)
+        chart_data[key] = values
+        chart_has_data[key] = any(v is not None for v in values)
 
     return render_template(
         "testing.html",
         water_quality=water_quality,
         water_quality_fetched_at=water_quality_fetched_at,
+        week_labels=week_labels,
         chart_data=chart_data,
+        chart_has_data=chart_has_data,
+        discharge_hours=discharge_hours,
+        discharge_fetched_at=discharge_fetched_at,
     )
 
 
