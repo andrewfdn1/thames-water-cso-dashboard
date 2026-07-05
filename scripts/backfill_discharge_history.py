@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""
+One-off, resumable backfill of national CSO discharge history into a local
+SQLite database (data/discharge_history.db), so features like a "total
+discharge over the last N months" chart don't depend on the live app's
+30-day rolling window.
+
+This is deliberately NOT part of the Flask app's request path -- it's a
+standalone script you run manually from a terminal, expected to take a
+while (the API can return a lot of data for some windows; a 180-day test
+pull returned 12,600 items across 64 pages in ~90s), and safe to interrupt
+(Ctrl+C) and re-run -- it checkpoints progress after every completed chunk
+and picks up where it left off.
+
+Usage:
+    python3 scripts/backfill_discharge_history.py
+    (run again any time to continue from the last checkpoint; it stops on
+    its own once it reaches today)
+
+Politeness / respectfulness toward a free public API:
+  - Fixed-size chronological chunks (14 days), not one giant date range --
+    keeps any single request/response reasonably sized even during a
+    storm-heavy period, and gives natural, frequent checkpoints.
+  - 1s pause between paginated pages (matches the main app's own pacing).
+  - A pause between a chunk's Start-events and Stop-events fetch.
+  - An adaptive pause between chunks, proportional to how much data the
+    last chunk returned, so a heavy (storm) chunk gets more breathing room
+    afterwards rather than being immediately followed by another request.
+  - Retries on HTTP 429 with exponential backoff.
+  - Documented rate limit is 5 requests/second per user; this script stays
+    far under that on purpose.
+"""
+import os
+import sys
+import time
+import sqlite3
+from collections import defaultdict
+from datetime import datetime, date, timedelta, timezone
+
+BASE = "https://api.thameswater.co.uk/opendata/v2/discharge"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+PAGE_LIMIT = 200
+CHUNK_DAYS = 14
+
+# The API documents historical data back to April 2022, but explicitly
+# warns that visibility of events before the official "go live" date is
+# limited/non-representative by design -- starting the backfill from
+# go-live avoids treating that sparse pre-launch snapshot as real history.
+GO_LIVE_DATE = date(2022, 12, 30)
+
+DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "discharge_history.db")
+
+try:
+    import requests
+except ImportError:
+    print("This script needs the 'requests' package (already in requirements.txt).")
+    print("Run it with the project's venv active: source venv/bin/activate")
+    sys.exit(1)
+
+
+def db_connect():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS discharge_events (
+            permit    TEXT NOT NULL,
+            start_utc TEXT NOT NULL,
+            stop_utc  TEXT,
+            PRIMARY KEY (permit, start_utc)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS backfill_progress (
+            id               INTEGER PRIMARY KEY CHECK (id = 0),
+            next_chunk_start TEXT NOT NULL,
+            updated_at       TEXT NOT NULL
+        )
+    """)
+    return conn
+
+
+def load_progress(conn):
+    row = conn.execute("SELECT next_chunk_start FROM backfill_progress WHERE id = 0").fetchone()
+    if row:
+        return date.fromisoformat(row[0])
+    return GO_LIVE_DATE
+
+
+def save_progress(conn, next_chunk_start):
+    now = datetime.now(timezone.utc).isoformat()
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO backfill_progress (id, next_chunk_start, updated_at)
+            VALUES (0, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET next_chunk_start = excluded.next_chunk_start, updated_at = excluded.updated_at
+            """,
+            (next_chunk_start.isoformat(), now),
+        )
+
+
+def load_pending(conn):
+    """Starts seen in an earlier chunk that had no matching Stop yet --
+    reloaded here so resuming in a fresh process still pairs them
+    correctly with a Stop that turns up in a later chunk."""
+    pending = {}
+    for permit, start_utc in conn.execute("SELECT permit, start_utc FROM discharge_events WHERE stop_utc IS NULL"):
+        pending[permit] = datetime.fromisoformat(start_utc)
+    return pending
+
+
+def fetch_all_pages(url, params):
+    items = []
+    offset = 0
+    pages = 0
+    while True:
+        page_params = dict(params, limit=PAGE_LIMIT, offset=offset)
+        for attempt in range(5):
+            r = requests.get(url, params=page_params, headers=HEADERS, timeout=30)
+            if r.status_code == 429:
+                time.sleep(2 ** attempt)
+                continue
+            break
+        r.raise_for_status()
+        page = r.json().get("items", [])
+        items.extend(page)
+        pages += 1
+        if len(page) < PAGE_LIMIT:
+            break
+        offset += PAGE_LIMIT
+        time.sleep(1)
+    return items, pages
+
+
+def parse_dt(raw):
+    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def process_chunk(conn, starts, stops, pending):
+    """Pair this chunk's Start/Stop events with each other and with any
+    still-open start carried over from an earlier chunk. Assumes at most
+    one open discharge per permit at a time, matching how the live app
+    already treats a permit's status as a single current state."""
+    events = defaultdict(list)
+    for item in starts:
+        permit, dt_str = item.get("permitNumber"), item.get("datetime")
+        if permit and dt_str:
+            events[permit].append((parse_dt(dt_str), "start"))
+    for item in stops:
+        permit, dt_str = item.get("permitNumber"), item.get("datetime")
+        if permit and dt_str:
+            events[permit].append((parse_dt(dt_str), "stop"))
+
+    resolved = []
+    dropped_unmatched_stops = 0
+    dropped_unresolved_restarts = 0
+
+    for permit, evs in events.items():
+        evs.sort(key=lambda e: e[0])
+        cur_start = pending.get(permit)
+        for dt, kind in evs:
+            if kind == "start":
+                if cur_start is not None:
+                    # Two starts with no stop between them -- data quirk at
+                    # a chunk boundary or in the source itself. Keep the
+                    # newer start; the earlier one is unresolvable.
+                    dropped_unresolved_restarts += 1
+                cur_start = dt
+            else:
+                if cur_start is not None:
+                    resolved.append((permit, cur_start, dt))
+                    cur_start = None
+                else:
+                    # A stop with no start in view -- its start happened
+                    # before our backfill window began. Per the API's own
+                    # docs, a Stop only ever follows a Start, so this is
+                    # only possible right at our earliest boundary.
+                    dropped_unmatched_stops += 1
+        pending[permit] = cur_start
+
+    with conn:
+        for permit, start_dt, stop_dt in resolved:
+            conn.execute(
+                """
+                INSERT INTO discharge_events (permit, start_utc, stop_utc)
+                VALUES (?, ?, ?)
+                ON CONFLICT(permit, start_utc) DO UPDATE SET stop_utc = excluded.stop_utc
+                """,
+                (permit, start_dt.isoformat(), stop_dt.isoformat()),
+            )
+        for permit, start_dt in pending.items():
+            if start_dt is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO discharge_events (permit, start_utc, stop_utc) VALUES (?, ?, NULL)",
+                    (permit, start_dt.isoformat()),
+                )
+
+    return len(resolved), dropped_unmatched_stops, dropped_unresolved_restarts
+
+
+def main():
+    conn = db_connect()
+    pending = load_pending(conn)
+    chunk_start = load_progress(conn)
+    today = datetime.now(timezone.utc).date()
+
+    if chunk_start >= today:
+        print(f"Already caught up to {today.isoformat()}. Nothing to do.")
+        return
+
+    print(f"Resuming backfill from {chunk_start.isoformat()} toward {today.isoformat()}")
+    print(f"({len(pending)} still-open interval(s) carried over from a previous run)")
+
+    try:
+        while chunk_start < today:
+            chunk_end = min(chunk_start + timedelta(days=CHUNK_DAYS), today)
+            params = {"dateStart": chunk_start.isoformat(), "dateEnd": chunk_end.isoformat()}
+
+            t0 = time.time()
+            starts, start_pages = fetch_all_pages(BASE + "/alerts", dict(params, alertType="Start"))
+            time.sleep(1)
+            stops, stop_pages = fetch_all_pages(BASE + "/alerts", dict(params, alertType="Stop"))
+            elapsed = time.time() - t0
+
+            resolved_n, dropped_stops, dropped_restarts = process_chunk(conn, starts, stops, pending)
+            save_progress(conn, chunk_end)
+
+            total_pages = start_pages + stop_pages
+            print(
+                f"{chunk_start.isoformat()}..{chunk_end.isoformat()}: "
+                f"{len(starts)} starts + {len(stops)} stops ({total_pages} pages, {elapsed:.1f}s) "
+                f"-> {resolved_n} resolved, {len(pending)} still open"
+                + (f", {dropped_stops} unmatched stops" if dropped_stops else "")
+                + (f", {dropped_restarts} unresolved restarts" if dropped_restarts else "")
+            )
+
+            chunk_start = chunk_end
+            # Adaptive politeness: more pages this chunk -> longer pause
+            # before the next one, so a storm-heavy period doesn't get
+            # hammered with back-to-back large requests.
+            time.sleep(max(2.0, total_pages * 0.5))
+    except KeyboardInterrupt:
+        print(f"\nStopped early. Progress saved through {chunk_start.isoformat()} -- re-run this script any time to continue.")
+        return
+
+    print(f"\nDone. Backfilled through {today.isoformat()}.")
+
+
+if __name__ == "__main__":
+    main()
