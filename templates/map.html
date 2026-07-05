@@ -15,7 +15,14 @@
     Marker colour = receiving watercourse, with the Tideway Tunnel shown as its own category. Larger, brighter markers are currently discharging. Hover a marker for full details. Use the legend to switch categories on or off.
   </p>
   <div id="map"></div>
-  <div class="legend" id="map-legend"></div>
+  <div class="legend" id="map-legend">
+    <div class="legend-controls">
+      <span class="legend-title">Categories</span>
+      <button type="button" id="legend-select-all">All</button>
+      <button type="button" id="legend-select-none">None</button>
+    </div>
+    <div id="legend-rows"></div>
+  </div>
 </main>
 <footer>
   {{ total_monitors }} monitors plotted &middot; refreshed {{ monitors_fetched_at }}
@@ -86,7 +93,21 @@
     layersByCategory[category].addTo(map);
   });
 
-  const legend = document.getElementById('map-legend');
+  const legendRows = document.getElementById('legend-rows');
+  const rowsByCategory = {};
+
+  function setCategoryOn(category, on) {
+    const layer = layersByCategory[category];
+    const row = rowsByCategory[category];
+    if (on) {
+      if (!map.hasLayer(layer)) layer.addTo(map);
+      row.classList.remove('off');
+    } else {
+      if (map.hasLayer(layer)) map.removeLayer(layer);
+      row.classList.add('off');
+    }
+  }
+
   categoriesSorted.forEach(function (category) {
     const row = document.createElement('div');
     row.className = 'legend-row';
@@ -95,16 +116,17 @@
       '<span>' + category + '</span>' +
       '<span class="legend-count">(' + countsByCategory[category] + ')</span>';
     row.addEventListener('click', function () {
-      const layer = layersByCategory[category];
-      if (map.hasLayer(layer)) {
-        map.removeLayer(layer);
-        row.classList.add('off');
-      } else {
-        layer.addTo(map);
-        row.classList.remove('off');
-      }
+      setCategoryOn(category, !map.hasLayer(layersByCategory[category]));
     });
-    legend.appendChild(row);
+    rowsByCategory[category] = row;
+    legendRows.appendChild(row);
+  });
+
+  document.getElementById('legend-select-all').addEventListener('click', function () {
+    categoriesSorted.forEach(function (category) { setCategoryOn(category, true); });
+  });
+  document.getElementById('legend-select-none').addEventListener('click', function () {
+    categoriesSorted.forEach(function (category) { setCategoryOn(category, false); });
   });
 </script>
 </body>

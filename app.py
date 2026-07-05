@@ -3,10 +3,11 @@ from werkzeug.exceptions import HTTPException
 from datetime import datetime, timezone, timedelta, date
 from collections import defaultdict
 from io import StringIO
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 import csv
 import re
+import sqlite3
 import requests
 import threading
 import traceback
@@ -59,7 +60,22 @@ _DEFAULT_WINDOW   = "24h"
 _LOOKBACK_DAYS    = 30
 
 _cache          = {}
-_cache_lock     = threading.Lock()
+_cache_locks    = {}
+_cache_locks_mu = threading.Lock()
+
+
+def _get_lock(key):
+    """Per-key lock, not one lock shared across every cache entry — a slow
+    fetch for one key (e.g. the startup prewarm's national monitors pull,
+    which can take several seconds) must not make a concurrent request for
+    a completely different, not-yet-cached key (e.g. water_quality) fail to
+    acquire and silently come back empty. That was happening in practice:
+    the very first hit to a cold key while prewarm held the single shared
+    lock always lost the race and got None back with no retry."""
+    with _cache_locks_mu:
+        if key not in _cache_locks:
+            _cache_locks[key] = threading.Lock()
+        return _cache_locks[key]
 
 
 def get_cached(key, fetch_fn, ttl_seconds):
@@ -67,14 +83,13 @@ def get_cached(key, fetch_fn, ttl_seconds):
     if key in _cache and now - _cache[key]["ts"] < ttl_seconds:
         return _cache[key]["data"], _cache[key]["fetched_at"]
 
-    # Non-blocking: if another thread (typically the startup prewarm) is
-    # already mid-fetch, serve whatever's cached instead of waiting on it.
-    # Blocking here used to let gunicorn's worker-timeout kill the process
-    # mid-request whenever a request landed during a slow prewarm, which
-    # then made the *next* worker's very first fetch look suspiciously
-    # unreliable too — this avoids the request thread ever blocking on a
-    # live network call at all.
-    if not _cache_lock.acquire(blocking=False):
+    # Non-blocking: if another thread is already mid-fetch for this same
+    # key, serve whatever's cached instead of waiting on it. Blocking here
+    # used to let gunicorn's worker-timeout kill the process mid-request
+    # whenever a request landed during a slow prewarm of that same key —
+    # this avoids the request thread ever blocking on a live network call.
+    lock = _get_lock(key)
+    if not lock.acquire(blocking=False):
         if key in _cache:
             return _cache[key]["data"], _cache[key]["fetched_at"]
         return None, ""
@@ -94,7 +109,7 @@ def get_cached(key, fetch_fn, ttl_seconds):
                 return _cache[key]["data"], _cache[key]["fetched_at"]
             return None, ""
     finally:
-        _cache_lock.release()
+        lock.release()
 
 
 def _fetch_all_pages(url, params):
@@ -510,16 +525,28 @@ _WQ_PTRC_URL = (
     "14i4LMVw5OA1NvE8i14cbGo8M6nnUVlFV1pRbpjMmYnA"
     "/export?format=csv&gid=132413204"
 )
-_WQ_ECOLI_GOOD   = 1_000    # CFU/100ml — at/below this is shown as good (green)
-_WQ_STALE_DAYS   = 7
-_WQ_HISTORY_DAYS = 365      # Testing page chart window
+_WQ_ECOLI_GOOD     = 1_000    # CFU/100ml — at/below this is shown as good (green)
+_WQ_STALE_DAYS     = 7
+_WQ_HISTORY_DAYS   = 365      # Testing page chart window
+_WQ_REFRESH_SECONDS = 86400   # daily — the sheets are hand-updated ~weekly, so
+                               # there's nothing to gain from polling more often
+                               # than that, and it keeps this to one small CSV
+                               # fetch/day per site once running on the Pi.
+
+_WQ_VOID_TOKENS = ("", "void", "na", "n/a", "-", "tbc", "pending", "error", "n/k", "unknown")
+
+_WQ_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "water_quality.db")
 
 
 def _wq_parse_ecoli(raw):
-    if not raw:
+    """Extract an integer CFU/100ml reading from a messy sheet cell. Handles
+    plain numbers, comma-thousands ("43,000"), a value in parentheses
+    (seen alongside a separate flag/status in the same cell), and the usual
+    non-numeric placeholders ("void", "TBC", blank, etc.)."""
+    if raw is None:
         return None
     raw = str(raw).strip()
-    if raw.lower() in ("", "void", "na", "n/a", "-"):
+    if raw.lower() in _WQ_VOID_TOKENS:
         return None
     m = re.search(r"\((\d[\d,]*)\)", raw)
     if m:
@@ -534,10 +561,16 @@ def _wq_parse_ecoli(raw):
 
 
 def _wq_parse_date(raw):
+    """Parse a sheet date cell. Sheets exported to CSV can render dates in
+    whatever display format the cell has (UK day/month/year is what both
+    known sources use), sometimes with a trailing time component — take
+    the date portion before any whitespace and try each known format."""
     if not raw:
         return None
-    raw = str(raw).strip()
-    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%m/%d/%Y", "%m/%d/%y"):
+    raw = str(raw).strip().split(" ")[0]
+    if not raw:
+        return None
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%m/%d/%y"):
         try:
             return datetime.strptime(raw, fmt).date()
         except ValueError:
@@ -559,53 +592,85 @@ def _wq_find_col(keys, *candidates):
     return None
 
 
-def _wq_parse_sheet(raw_csv, site_label):
-    """Parse a testing site's Google Sheet export into a full, date-sorted
-    reading history. Column detection (rather than a fixed column name)
-    because the two sheets don't share exactly the same headers."""
-    reader = csv.DictReader(StringIO(raw_csv))
-    rows = [{k.strip(): v.strip() for k, v in row.items() if k} for row in reader]
-    if not rows:
-        return []
-    keys = list(rows[0].keys())
-
-    ecoli_col = None
+def _wq_find_ecoli_col(keys, site_label):
+    """Find the E. coli reading column by keyword rather than an exact
+    name, since the two known sources don't share a header ("Reading
+    E.Coli/100ml" vs "Alert One E.Coli reading (CFU per 100ml)"), and a
+    future source may word it differently again. Columns that are clearly a
+    secondary/additional monitor reading are excluded. If more than one
+    candidate remains, the first is used but all candidates are logged so a
+    genuinely ambiguous sheet is at least visible in the logs rather than
+    silently guessed."""
+    candidates = []
     for k in keys:
         kl = k.lower()
         if "e.coli" in kl or "ecoli" in kl or "e coli" in kl or "alert one" in kl:
             if "additional" not in kl and "monitor 2" not in kl and "monitor 3" not in kl:
-                ecoli_col = k
-                break
+                candidates.append(k)
+    if not candidates:
+        print(f"WARNING [wq/{site_label}]: no E. coli column found among headers {keys!r}")
+        return None
+    if len(candidates) > 1:
+        print(f"WARNING [wq/{site_label}]: multiple possible E. coli columns {candidates!r}, using {candidates[0]!r}")
+    return candidates[0]
+
+
+def _wq_parse_sheet(raw_csv, site_label):
+    """Parse a testing site's Google Sheet export into a full, date-sorted
+    reading history. Column detection (rather than a fixed column name)
+    because the sheets don't share exactly the same headers, and sheet
+    owners can rename/reorder columns at any time."""
+    reader = csv.DictReader(StringIO(raw_csv))
+    rows = [{k.strip(): (v or "").strip() for k, v in row.items() if k} for row in reader]
+    if not rows:
+        print(f"WARNING [wq/{site_label}]: sheet had no data rows")
+        return []
+    keys = list(rows[0].keys())
+
+    ecoli_col = _wq_find_ecoli_col(keys, site_label)
     if not ecoli_col:
-        print(f"WARNING [wq/{site_label}]: no E. coli column found")
         return []
 
     date_col = _wq_find_col(keys, "sample date", "date")
+    if not date_col:
+        print(f"WARNING [wq/{site_label}]: no date column found among headers {keys!r}")
+
     results = []
     for row in rows:
-        ecoli_val = _wq_parse_ecoli(row.get(ecoli_col, ""))
+        raw_value = row.get(ecoli_col, "")
+        ecoli_val = _wq_parse_ecoli(raw_value)
         sample_date = _wq_parse_date(row.get(date_col, "") if date_col else "")
-        if sample_date is None and ecoli_val is None:
-            continue
-        d_ago = (date.today() - sample_date).days if sample_date else None
-        stale = d_ago is not None and d_ago > _WQ_STALE_DAYS
+        if sample_date is None:
+            continue   # no date to key this reading on — can't chart or store it
+        d_ago = (date.today() - sample_date).days
+        stale = d_ago > _WQ_STALE_DAYS
         results.append({
-            "date":     sample_date.isoformat() if sample_date else None,
-            "date_str": sample_date.strftime("%-d %b %Y") if sample_date else "—",
-            "days_ago": d_ago,
-            "stale":    stale,
-            "ecoli":    ecoli_val,
-            "risk":     _wq_risk(ecoli_val, stale=stale),
+            "date":          sample_date.isoformat(),
+            "date_str":      sample_date.strftime("%-d %b %Y"),
+            "days_ago":      d_ago,
+            "stale":         stale,
+            "ecoli":         ecoli_val,
+            "risk":          _wq_risk(ecoli_val, stale=stale),
+            "raw_value":     raw_value,
+            "source_column": ecoli_col,
         })
-    results.sort(key=lambda r: r["date"] or "", reverse=True)
+    results.sort(key=lambda r: r["date"], reverse=True)
+    print(
+        f"INFO [wq/{site_label}]: parsed {len(results)} dated rows "
+        f"({sum(1 for r in results if r['ecoli'] is not None)} with a reading), "
+        f"ecoli_col={ecoli_col!r} date_col={date_col!r}"
+    )
     return results
 
 
 def _wq_fetch_site(url, site_label):
     if not url:
         return []
+    # Some hosts (Google included) treat a bare urllib request differently
+    # from a browser — a real User-Agent avoids that class of surprise.
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urlopen(url, timeout=15) as resp:
+        with urlopen(req, timeout=15) as resp:
             return _wq_parse_sheet(resp.read().decode("utf-8"), site_label)
     except HTTPError as e:
         if e.code == 403:
@@ -619,13 +684,101 @@ def _wq_fetch_site(url, site_label):
         raise
 
 
+def _wq_db_connect():
+    os.makedirs(os.path.dirname(_WQ_DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(_WQ_DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ecoli_readings (
+            site           TEXT NOT NULL,
+            sample_date    TEXT NOT NULL,
+            ecoli_cfu      INTEGER,
+            raw_value      TEXT,
+            source_column  TEXT,
+            first_seen_at  TEXT NOT NULL,
+            last_seen_at   TEXT NOT NULL,
+            PRIMARY KEY (site, sample_date)
+        )
+    """)
+    return conn
+
+
+def _wq_db_upsert(site, rows):
+    """Persist newly parsed rows into the local database. Never deletes —
+    if the source sheet is later edited or a row disappears, our copy of
+    that reading is kept, which is the reason this store exists at all.
+    A re-fetch that includes a date we already have updates the value
+    (the sheet owner corrected something) without losing first_seen_at."""
+    if not rows:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _wq_db_connect()
+    try:
+        with conn:
+            for r in rows:
+                conn.execute(
+                    """
+                    INSERT INTO ecoli_readings
+                        (site, sample_date, ecoli_cfu, raw_value, source_column, first_seen_at, last_seen_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(site, sample_date) DO UPDATE SET
+                        ecoli_cfu     = excluded.ecoli_cfu,
+                        raw_value     = excluded.raw_value,
+                        source_column = excluded.source_column,
+                        last_seen_at  = excluded.last_seen_at
+                    """,
+                    (site, r["date"], r["ecoli"], r["raw_value"], r["source_column"], now, now),
+                )
+    finally:
+        conn.close()
+
+
+def _wq_db_read_history(site):
+    """Read this site's full stored history back out, in the same shape
+    _wq_parse_sheet produces, so callers don't care whether a value came
+    from a fresh fetch or from what we'd already saved."""
+    conn = _wq_db_connect()
+    try:
+        cur = conn.execute(
+            "SELECT sample_date, ecoli_cfu FROM ecoli_readings WHERE site = ? ORDER BY sample_date DESC",
+            (site,),
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    results = []
+    for sample_date_str, ecoli_val in rows:
+        sample_date = date.fromisoformat(sample_date_str)
+        d_ago = (date.today() - sample_date).days
+        stale = d_ago > _WQ_STALE_DAYS
+        results.append({
+            "date":     sample_date_str,
+            "date_str": sample_date.strftime("%-d %b %Y"),
+            "days_ago": d_ago,
+            "stale":    stale,
+            "ecoli":    ecoli_val,
+            "risk":     _wq_risk(ecoli_val, stale=stale),
+        })
+    return results
+
+
 def get_water_quality():
-    """E. coli readings for each testing site. Cached 6h (sheets are updated
-    roughly weekly). Returns per-site full history (Testing page chart) plus
-    a pre-formatted 'latest' summary (Summary page table)."""
-    def fetch_one(label, url):
-        rows = _wq_fetch_site(url, label)
-        latest = next((r for r in rows if r["ecoli"] is not None), None)
+    """E. coli readings for each testing site. Cached per _WQ_REFRESH_SECONDS.
+    Each site's live sheet is fetched best-effort and upserted into a local
+    SQLite database; the history and latest-reading summary returned to
+    callers is always read back from that database, not the raw fetch, so a
+    transient network failure, a 403, or the source sheet being edited or
+    deleted only means no new rows this cycle — nothing already captured is
+    lost, and the two sites' fates aren't tied together."""
+    def fetch_one(site_key, label, url):
+        try:
+            rows = _wq_fetch_site(url, label)
+            _wq_db_upsert(site_key, rows)
+        except Exception as e:
+            print(f"ERROR [wq/{label}]: live fetch failed, serving stored history only: {e!r}")
+
+        history = _wq_db_read_history(site_key)
+        latest = next((r for r in history if r["ecoli"] is not None), None)
         if latest:
             d = latest["days_ago"]
             if d == 0:
@@ -648,15 +801,15 @@ def get_water_quality():
                 "ecoli_str": "—", "date_str": "—", "days_ago_str": "unavailable",
                 "risk": "unknown", "available": False,
             }
-        return {"history": rows, "latest": latest_summary}
+        return {"history": history, "latest": latest_summary}
 
     def fetch():
         return {
-            "frbc": fetch_one("FRBC", _WQ_FRBC_URL),
-            "ptrc": fetch_one("PTRC", _WQ_PTRC_URL),
+            "frbc": fetch_one("frbc", "FRBC", _WQ_FRBC_URL),
+            "ptrc": fetch_one("ptrc", "PTRC", _WQ_PTRC_URL),
         }
 
-    return get_cached("water_quality", fetch, ttl_seconds=21600)
+    return get_cached("water_quality", fetch, ttl_seconds=_WQ_REFRESH_SECONDS)
 
 
 @app.route("/")
@@ -723,13 +876,10 @@ def debug_cache():
     bypassing build_dataset(), to see whether _cache itself is populated
     or whether the bug is downstream of it."""
     now = datetime.now(timezone.utc).timestamp()
-    lock_acquired = _cache_lock.acquire(blocking=False)
-    if lock_acquired:
-        _cache_lock.release()
     return jsonify({
         "pid": os.getpid(),
-        "lock_was_free": lock_acquired,
         "cache_keys": list(_cache.keys()),
+        "locked_keys": [k for k, l in _cache_locks.items() if l.locked()],
         "cache_detail": {
             k: {
                 "age_seconds": round(now - v["ts"], 1),
