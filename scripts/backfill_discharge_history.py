@@ -106,7 +106,8 @@ def load_pending(conn):
     reloaded here so resuming in a fresh process still pairs them
     correctly with a Stop that turns up in a later chunk."""
     pending = {}
-    for permit, start_utc in conn.execute("SELECT permit, start_utc FROM discharge_events WHERE stop_utc IS NULL"):
+    rows = conn.execute("SELECT permit, start_utc FROM discharge_events WHERE stop_utc IS NULL").fetchall()
+    for permit, start_utc in rows:
         pending[permit] = datetime.fromisoformat(start_utc)
     return pending
 
