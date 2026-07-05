@@ -252,6 +252,17 @@ def get_discharge_windows():
         if starts:
             print(f"sample start permit: {starts[0].get('permitNumber')!r}")
 
+        if not starts and not stops:
+            # A 30-day national pull has never come back with genuinely zero
+            # Start/Stop events (hundreds is typical) — treat an all-empty
+            # result as a bad upstream response rather than caching it as
+            # "every permit in the country stopped discharging", so
+            # get_cached falls back to the last known-good data instead.
+            raise RuntimeError(
+                "discharge/alerts returned 0 starts and 0 stops nationally — "
+                "treating as a bad response rather than genuine data"
+            )
+
         stops_by_permit = defaultdict(list)
         for s in stops:
             permit, dt_str = s.get("permitNumber"), s.get("datetime")
