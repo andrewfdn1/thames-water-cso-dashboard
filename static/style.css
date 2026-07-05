@@ -319,3 +319,32 @@ a { color: inherit; }
   padding: 16px 18px;
   margin-bottom: 28px;
 }
+
+.zone-toggles {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.zone-toggle {
+  font-size: 0.78rem;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.zone-toggle:hover {
+  background: var(--page-plane);
+  color: var(--text-primary);
+}
+
+.zone-toggle.active {
+  background: var(--text-primary);
+  color: var(--page-plane);
+  border-color: var(--text-primary);
+  font-weight: 600;
+}

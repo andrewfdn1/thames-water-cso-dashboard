@@ -866,44 +866,50 @@ def _load_discharge_intervals():
     return intervals
 
 
+_DISCHARGE_ZONE_LIMIT = 15   # cap on individual watercourse toggle options, busiest first
+
+
 def get_total_discharge_weekly():
-    """Weekly discharge hours from two angles, always excluding Tideway
-    Tunnel permits (captured, never reaches a river) -- same exclusion the
-    Summary page's subtotal already applies:
-      - "national_hours": every non-tunnel permit in the country.
-      - "thames_hours": only permits whose receiving watercourse is the
-        River Thames itself -- a locally-relevant comparison for a
-        Thames-side testing site, since the national total mixes in rivers
-        with no bearing on a specific site's water quality.
-    Tunnel/watercourse classification comes from the *current* monitor
-    list, since both are fixed site properties, not something that varies
-    week to week; a permit retired before today's monitor list won't be
-    classifiable and is conservatively counted as national-only, not
-    Thames."""
+    """Weekly discharge hours per zone, always excluding Tideway Tunnel
+    permits (captured, never reaches a river) -- same exclusion the
+    Summary page's subtotal already applies. Returns a "National (excl.
+    Tideway Tunnel)" total plus the busiest individual watercourses as
+    separate toggleable series, matching the receiving-watercourse
+    breakdown the Summary page already shows -- since National mixes in
+    every river in the country, it's on a totally different scale to any
+    single watercourse (thousands of hours/week vs a handful), which makes
+    them unreadable plotted together; letting the page pick one zone at a
+    time keeps the chart's axis meaningful for whichever is selected.
+
+    Watercourse classification comes from the *current* monitor list, since
+    it's a fixed site property, not something that varies week to week; a
+    permit retired before today's monitor list won't be classifiable and
+    is excluded from every zone (including National)."""
     def fetch():
         monitors, _ = get_all_monitors()
         monitors = monitors or {}
-        tunnel_permits = {p for p, m in monitors.items() if m.get("tunnel_connected_inferred")}
-        thames_permits = {
-            p for p, m in monitors.items()
-            if m.get("water") == "River Thames" and not m.get("tunnel_connected_inferred")
+        permit_zone = {
+            p: (m.get("water") or "Unknown")
+            for p, m in monitors.items()
+            if not m.get("tunnel_connected_inferred")
         }
 
         intervals = _load_discharge_intervals()
         now_utc = datetime.now(timezone.utc)
         buckets = _week_buckets()
         n = len(buckets)
-        national_secs = [0.0] * n
-        thames_secs = [0.0] * n
         window_start = datetime.combine(buckets[0][0], datetime.min.time(), tzinfo=timezone.utc)
 
+        national_secs = [0.0] * n
+        secs_by_zone = defaultdict(lambda: [0.0] * n)
+
         for permit, start_dt, stop_dt in intervals:
-            if permit in tunnel_permits:
-                continue
+            zone = permit_zone.get(permit)
+            if zone is None:
+                continue   # tunnel-connected, or not in the current monitor list
             effective_stop = stop_dt or now_utc
             if effective_stop <= window_start:
                 continue
-            is_thames = permit in thames_permits
             start_idx = max(0, (start_dt.date() - buckets[0][0]).days // 7)
             for i in range(start_idx, n):
                 b_start = datetime.combine(buckets[i][0], datetime.min.time(), tzinfo=timezone.utc)
@@ -915,13 +921,17 @@ def get_total_discharge_weekly():
                 if clipped_stop > clipped_start:
                     secs = (clipped_stop - clipped_start).total_seconds()
                     national_secs[i] += secs
-                    if is_thames:
-                        thames_secs[i] += secs
+                    secs_by_zone[zone][i] += secs
+
+        busiest = sorted(secs_by_zone.items(), key=lambda kv: -sum(kv[1]))[:_DISCHARGE_ZONE_LIMIT]
+
+        zones = {"National (excl. Tideway Tunnel)": [round(s / 3600, 2) for s in national_secs]}
+        for name, secs in busiest:
+            zones[name] = [round(s / 3600, 2) for s in secs]
 
         return {
-            "week_starts":     [b[0].isoformat() for b in buckets],
-            "national_hours":  [round(s / 3600, 2) for s in national_secs],
-            "thames_hours":    [round(s / 3600, 2) for s in thames_secs],
+            "week_starts": [b[0].isoformat() for b in buckets],
+            "zones":       zones,
         }
 
     return get_cached("total_discharge_weekly", fetch, ttl_seconds=_WQ_REFRESH_SECONDS)
@@ -972,9 +982,7 @@ def testing_view():
     week_labels = [b[0].strftime("%-d %b") for b in buckets]
 
     discharge_weekly, discharge_fetched_at = get_total_discharge_weekly()
-    discharge_weekly = discharge_weekly or {}
-    national_hours = discharge_weekly.get("national_hours") or [0] * len(buckets)
-    thames_hours = discharge_weekly.get("thames_hours") or [0] * len(buckets)
+    discharge_zones = (discharge_weekly or {}).get("zones") or {}
 
     chart_data = {}
     chart_has_data = {}
@@ -990,8 +998,7 @@ def testing_view():
         week_labels=week_labels,
         chart_data=chart_data,
         chart_has_data=chart_has_data,
-        national_hours=national_hours,
-        thames_hours=thames_hours,
+        discharge_zones=discharge_zones,
         discharge_fetched_at=discharge_fetched_at,
     )
 

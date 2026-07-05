@@ -36,12 +36,13 @@
     </tbody>
   </table>
   <p style="color:var(--text-muted); font-size:0.8rem; margin:-18px 0 24px;">
-    Each chart also overlays two discharge series per week (excluding the Tideway Tunnel) on the right-hand axis: the national total, and discharge direct to the River Thames itself.
+    Each chart also overlays discharge hours per week (right-hand axis) for one CSO zone at a time &mdash; use the toggles to switch zones. National and individual watercourses are on very different scales, so only one is shown at once.
   </p>
 
   {% for key, label in [('frbc', 'FRBC'), ('ptrc', 'PTRC')] %}
-  <div class="section-title">{{ label }} &mdash; E coli readings and total discharge, last 12 months</div>
+  <div class="section-title">{{ label }} &mdash; E coli readings and discharge, last 12 months</div>
   {% if chart_has_data[key] %}
+  <div class="zone-toggles" id="zone-toggles-{{ key }}"></div>
   <div class="chart-card">
     <canvas id="chart-{{ key }}" height="90"></canvas>
   </div>
@@ -57,17 +58,24 @@
 <script>
   const WEEK_LABELS = {{ week_labels | tojson }};
   const CHART_DATA = {{ chart_data | tojson }};
-  const NATIONAL_HOURS = {{ national_hours | tojson }};
-  const THAMES_HOURS = {{ thames_hours | tojson }};
+  const DISCHARGE_ZONES = {{ discharge_zones | tojson }};
+  const ZONE_NAMES = Object.keys(DISCHARGE_ZONES);
   const SITE_LABELS = {frbc: 'FRBC', ptrc: 'PTRC'};
+
+  function defaultZone() {
+    const thames = ZONE_NAMES.find(function (z) { return z === 'River Thames'; });
+    return thames || ZONE_NAMES[0];
+  }
 
   Object.keys(CHART_DATA).forEach(function (key) {
     const ecoliValues = CHART_DATA[key];
     if (!ecoliValues || ecoliValues.every(function (v) { return v === null; })) return;
     const canvas = document.getElementById('chart-' + key);
-    if (!canvas) return;
+    if (!canvas || !ZONE_NAMES.length) return;
 
-    new Chart(canvas.getContext('2d'), {
+    let currentZone = defaultZone();
+
+    const chart = new Chart(canvas.getContext('2d'), {
       type: 'line',
       data: {
         labels: WEEK_LABELS,
@@ -85,21 +93,10 @@
             yAxisID: 'y',
           },
           {
-            label: 'National discharge, excl. Tideway Tunnel (hours/week)',
-            data: NATIONAL_HOURS,
+            label: currentZone + ' discharge (hours/week)',
+            data: DISCHARGE_ZONES[currentZone],
             borderColor: '#3987e5',
             backgroundColor: 'rgba(57,135,229,0.08)',
-            pointRadius: 0,
-            borderWidth: 1.5,
-            tension: 0.15,
-            fill: false,
-            yAxisID: 'y1',
-          },
-          {
-            label: 'Direct to River Thames (hours/week)',
-            data: THAMES_HOURS,
-            borderColor: '#0ca30c',
-            backgroundColor: 'rgba(12,163,12,0.08)',
             pointRadius: 0,
             borderWidth: 1.5,
             tension: 0.15,
@@ -134,6 +131,24 @@
           },
         },
       },
+    });
+
+    const togglesEl = document.getElementById('zone-toggles-' + key);
+    ZONE_NAMES.forEach(function (zone) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'zone-toggle' + (zone === currentZone ? ' active' : '');
+      btn.textContent = zone;
+      btn.addEventListener('click', function () {
+        currentZone = zone;
+        chart.data.datasets[1].data = DISCHARGE_ZONES[zone];
+        chart.data.datasets[1].label = zone + ' discharge (hours/week)';
+        chart.update();
+        togglesEl.querySelectorAll('.zone-toggle').forEach(function (b) {
+          b.classList.toggle('active', b === btn);
+        });
+      });
+      togglesEl.appendChild(btn);
     });
   });
 </script>
