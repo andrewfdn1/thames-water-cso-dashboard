@@ -135,6 +135,32 @@ def fetch_all_pages(url, params):
     return items, pages
 
 
+def fetch_chunk(params, max_attempts=3):
+    """Fetch a chunk's Start+Stop events, retrying the whole chunk if both
+    come back completely empty. Confirmed in practice (2026-06-12..2026-07-05
+    initially came back as 0+0 during a long backfill run, then 259+24 and
+    24+24 on immediate re-check) that this API can return a valid HTTP 200
+    with zero items under sustained request load, which a single-shot fetch
+    can't distinguish from a genuinely quiet period. Only retries when the
+    result is suspiciously all-zero, so a normal chunk costs nothing extra."""
+    starts, stops, total_pages = [], [], 0
+    for attempt in range(1, max_attempts + 1):
+        starts, start_pages = fetch_all_pages(BASE + "/alerts", dict(params, alertType="Start"))
+        time.sleep(1)
+        stops, stop_pages = fetch_all_pages(BASE + "/alerts", dict(params, alertType="Stop"))
+        total_pages = start_pages + stop_pages
+        if starts or stops or attempt == max_attempts:
+            return starts, stops, total_pages
+        print(
+            f"    zero results for {params['dateStart']}..{params['dateEnd']} "
+            f"(attempt {attempt}/{max_attempts}) -- retrying after a pause, in case "
+            f"this is the API returning an empty response under load rather than a "
+            f"genuinely quiet period"
+        )
+        time.sleep(10)
+    return starts, stops, total_pages
+
+
 def parse_dt(raw):
     dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     if dt.tzinfo is None:
@@ -204,9 +230,62 @@ def process_chunk(conn, starts, stops, pending):
     return len(resolved), dropped_unmatched_stops, dropped_unresolved_restarts
 
 
+def run_chunks(conn, pending, range_start, range_end, update_progress):
+    chunk_start = range_start
+    while chunk_start < range_end:
+        chunk_end = min(chunk_start + timedelta(days=CHUNK_DAYS), range_end)
+        params = {"dateStart": chunk_start.isoformat(), "dateEnd": chunk_end.isoformat()}
+
+        t0 = time.time()
+        starts, stops, total_pages = fetch_chunk(params)
+        elapsed = time.time() - t0
+
+        resolved_n, dropped_stops, dropped_restarts = process_chunk(conn, starts, stops, pending)
+        if update_progress:
+            save_progress(conn, chunk_end)
+
+        still_open = sum(1 for v in pending.values() if v is not None)
+        print(
+            f"{chunk_start.isoformat()}..{chunk_end.isoformat()}: "
+            f"{len(starts)} starts + {len(stops)} stops ({total_pages} pages, {elapsed:.1f}s) "
+            f"-> {resolved_n} resolved, {still_open} still open"
+            + (f", {dropped_stops} unmatched stops" if dropped_stops else "")
+            + (f", {dropped_restarts} unresolved restarts" if dropped_restarts else "")
+        )
+
+        chunk_start = chunk_end
+        # Adaptive politeness: more pages this chunk -> longer pause before
+        # the next one, so a storm-heavy period doesn't get hammered with
+        # back-to-back large requests.
+        time.sleep(max(2.0, total_pages * 0.5))
+
+
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Backfill (or repair) national CSO discharge history.")
+    parser.add_argument(
+        "--repair", nargs=2, metavar=("START", "END"),
+        help="Re-fetch and patch a specific YYYY-MM-DD date range without touching the "
+             "overall resume checkpoint. Use this to fix a range an earlier run recorded "
+             "as suspiciously empty.",
+    )
+    args = parser.parse_args()
+
     conn = db_connect()
     pending = load_pending(conn)
+
+    if args.repair:
+        range_start = date.fromisoformat(args.repair[0])
+        range_end = date.fromisoformat(args.repair[1])
+        print(f"Repairing {range_start.isoformat()}..{range_end.isoformat()} (resume checkpoint untouched)")
+        try:
+            run_chunks(conn, pending, range_start, range_end, update_progress=False)
+        except KeyboardInterrupt:
+            print("\nStopped early -- safe to re-run --repair for the same range any time.")
+            return
+        print("\nRepair pass complete.")
+        return
+
     chunk_start = load_progress(conn)
     today = datetime.now(timezone.utc).date()
 
@@ -215,38 +294,12 @@ def main():
         return
 
     print(f"Resuming backfill from {chunk_start.isoformat()} toward {today.isoformat()}")
-    print(f"({len(pending)} still-open interval(s) carried over from a previous run)")
+    print(f"({sum(1 for v in pending.values() if v is not None)} still-open interval(s) carried over from a previous run)")
 
     try:
-        while chunk_start < today:
-            chunk_end = min(chunk_start + timedelta(days=CHUNK_DAYS), today)
-            params = {"dateStart": chunk_start.isoformat(), "dateEnd": chunk_end.isoformat()}
-
-            t0 = time.time()
-            starts, start_pages = fetch_all_pages(BASE + "/alerts", dict(params, alertType="Start"))
-            time.sleep(1)
-            stops, stop_pages = fetch_all_pages(BASE + "/alerts", dict(params, alertType="Stop"))
-            elapsed = time.time() - t0
-
-            resolved_n, dropped_stops, dropped_restarts = process_chunk(conn, starts, stops, pending)
-            save_progress(conn, chunk_end)
-
-            total_pages = start_pages + stop_pages
-            print(
-                f"{chunk_start.isoformat()}..{chunk_end.isoformat()}: "
-                f"{len(starts)} starts + {len(stops)} stops ({total_pages} pages, {elapsed:.1f}s) "
-                f"-> {resolved_n} resolved, {len(pending)} still open"
-                + (f", {dropped_stops} unmatched stops" if dropped_stops else "")
-                + (f", {dropped_restarts} unresolved restarts" if dropped_restarts else "")
-            )
-
-            chunk_start = chunk_end
-            # Adaptive politeness: more pages this chunk -> longer pause
-            # before the next one, so a storm-heavy period doesn't get
-            # hammered with back-to-back large requests.
-            time.sleep(max(2.0, total_pages * 0.5))
+        run_chunks(conn, pending, chunk_start, today, update_progress=True)
     except KeyboardInterrupt:
-        print(f"\nStopped early. Progress saved through {chunk_start.isoformat()} -- re-run this script any time to continue.")
+        print("\nStopped early. Progress was saved after every completed chunk -- re-run this script any time to continue.")
         return
 
     print(f"\nDone. Backfilled through {today.isoformat()}.")
