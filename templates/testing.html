@@ -36,7 +36,7 @@
     </tbody>
   </table>
   <p style="color:var(--text-muted); font-size:0.8rem; margin:-18px 0 24px;">
-    Each chart also overlays discharge hours per week (right-hand axis) for one CSO zone at a time &mdash; pick a zone from the dropdown. National and individual watercourses are on very different scales, so only one is shown at once.
+    Both charts also overlay discharge hours per week (right-hand axis) for one CSO zone at a time &mdash; pick a zone from the dropdown and it applies to both. National and individual watercourses are on very different scales, so only one is shown at once.
   </p>
 
   <form method="get" class="date-range-form">
@@ -69,13 +69,16 @@
     <button type="submit">Apply</button>
   </form>
 
+  {% if chart_has_data.values() | select | list | length > 0 %}
+  <div class="zone-select-row">
+    <label for="zone-select">Discharge zone (applies to both charts below):</label>
+    <select id="zone-select" class="zone-select"></select>
+  </div>
+  {% endif %}
+
   {% for key, label in [('frbc', 'FRBC'), ('ptrc', 'PTRC')] %}
   <div class="section-title">{{ label }} &mdash; E coli readings and discharge, {{ range_start.strftime('%b %Y') }}&ndash;{{ range_end.strftime('%b %Y') }}</div>
   {% if chart_has_data[key] %}
-  <div class="zone-select-row">
-    <label for="zone-select-{{ key }}">Discharge zone:</label>
-    <select id="zone-select-{{ key }}" class="zone-select"></select>
-  </div>
   <div class="chart-card">
     <canvas id="chart-{{ key }}" height="90"></canvas>
   </div>
@@ -100,13 +103,14 @@
     return thames || ZONE_NAMES[0];
   }
 
+  const currentZone = defaultZone();
+  const charts = {};
+
   Object.keys(CHART_DATA).forEach(function (key) {
     const ecoliValues = CHART_DATA[key];
     if (!ecoliValues || ecoliValues.every(function (v) { return v === null; })) return;
     const canvas = document.getElementById('chart-' + key);
     if (!canvas || !ZONE_NAMES.length) return;
-
-    let currentZone = defaultZone();
 
     const chart = new Chart(canvas.getContext('2d'), {
       type: 'line',
@@ -166,7 +170,11 @@
       },
     });
 
-    const selectEl = document.getElementById('zone-select-' + key);
+    charts[key] = chart;
+  });
+
+  const selectEl = document.getElementById('zone-select');
+  if (selectEl) {
     ZONE_NAMES.forEach(function (zone) {
       const opt = document.createElement('option');
       opt.value = zone;
@@ -176,11 +184,14 @@
     });
     selectEl.addEventListener('change', function () {
       const zone = selectEl.value;
-      chart.data.datasets[1].data = DISCHARGE_ZONES[zone];
-      chart.data.datasets[1].label = zone + ' discharge (hours/week)';
-      chart.update();
+      Object.keys(charts).forEach(function (key) {
+        const chart = charts[key];
+        chart.data.datasets[1].data = DISCHARGE_ZONES[zone];
+        chart.data.datasets[1].label = zone + ' discharge (hours/week)';
+        chart.update();
+      });
     });
-  });
+  }
 </script>
 </body>
 </html>

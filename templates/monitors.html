@@ -11,6 +11,13 @@
 <main>
   <div class="filters">
     <input id="search" type="search" placeholder="Search by site name, watercourse or permit&hellip;">
+    <select id="status-filter">
+      <option value="">All statuses</option>
+      <option value="discharging">Discharging now</option>
+      <option value="not-discharging">Not discharging</option>
+      <option value="offline">Offline</option>
+      <option value="unknown">Unknown</option>
+    </select>
     <select id="window-filter">
       <option value="">All monitors</option>
       <option value="24h">Discharged in last 24hr</option>
@@ -38,12 +45,12 @@
         </td>
       </tr>
       {% for s in g.stations %}
-      {% set data_status = 'discharging' if s.is_discharging else ('unknown' if s.status|lower == 'unknown' else 'not-discharging') %}
+      {% set data_status = 'discharging' if s.is_discharging else ('offline' if 'offline' in s.status|lower else ('unknown' if s.status|lower == 'unknown' else 'not-discharging')) %}
       {% set is_tunnel_discharge = s.is_discharging and s.tunnel_connected_inferred %}
       {% set display_status_class = 'tunnel-discharging' if is_tunnel_discharge else data_status %}
       {% set discharged = [] %}
       {% for win in windows %}{% if s.hours_by_window[win.key] != '0h 00m' %}{{ discharged.append(win.key) or '' }}{% endif %}{% endfor %}
-      <tr class="{{ 'tunnel-row' if is_tunnel_discharge else '' }}" data-search="{{ (s.name ~ ' ' ~ s.water ~ ' ' ~ s.permit) | lower }}" data-discharged="{{ discharged | join(',') }}">
+      <tr class="{{ 'tunnel-row' if is_tunnel_discharge else '' }}" data-search="{{ (s.name ~ ' ' ~ s.water ~ ' ' ~ s.permit) | lower }}" data-discharged="{{ discharged | join(',') }}" data-status="{{ data_status }}">
         <td>
           {% if s.lat is not none and s.lon is not none %}
           <a href="https://www.google.com/maps?q={{ s.lat }},{{ s.lon }}" target="_blank" rel="noopener">{{ s.name }}</a>
@@ -68,11 +75,13 @@
 </footer>
 <script>
   const search = document.getElementById('search');
+  const statusFilter = document.getElementById('status-filter');
   const windowFilter = document.getElementById('window-filter');
   const groups = Array.from(document.querySelectorAll('#monitor-table tbody.monitor-group'));
 
   function applyFilters() {
     const q = search.value.trim().toLowerCase();
+    const status = statusFilter.value;
     const win = windowFilter.value;
 
     groups.forEach(function (tbody) {
@@ -80,9 +89,10 @@
       let anyVisible = false;
       dataRows.forEach(function (row) {
         const matchesSearch = !q || row.dataset.search.includes(q);
+        const matchesStatus = !status || row.dataset.status === status;
         const discharged = row.dataset.discharged ? row.dataset.discharged.split(',') : [];
         const matchesWindow = !win || discharged.includes(win);
-        const visible = matchesSearch && matchesWindow;
+        const visible = matchesSearch && matchesStatus && matchesWindow;
         row.style.display = visible ? '' : 'none';
         if (visible) anyVisible = true;
       });
@@ -91,6 +101,7 @@
   }
 
   search.addEventListener('input', applyFilters);
+  statusFilter.addEventListener('change', applyFilters);
   windowFilter.addEventListener('change', applyFilters);
 </script>
 </body>

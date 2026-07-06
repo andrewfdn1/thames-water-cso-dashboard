@@ -162,6 +162,12 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   border: 2px dashed var(--text-muted);
 }
 
+.status.offline { color: var(--status-warning); }
+.status.offline .dot {
+  background: transparent;
+  border: 2px solid var(--status-warning);
+}
+
 .status.tunnel-discharging { color: var(--status-good); }
 .status.tunnel-discharging .dot { background: var(--status-good); }
 
