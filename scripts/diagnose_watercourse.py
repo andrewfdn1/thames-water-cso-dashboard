@@ -14,6 +14,14 @@ Two modes:
   whether an issue is isolated or widespread):
       python3 scripts/diagnose_watercourse.py --all
 
+  Live verification (re-fetches ONE permit's raw Start/Stop events directly
+  from Thames Water's live API for a given window, and compares them
+  against what's stored locally -- the decisive check for a single
+  suspiciously long, closed interval: does the live API actually agree
+  there's no Stop/Start pair hiding inside it, or did our own backfill
+  silently drop one?):
+      python3 scripts/diagnose_watercourse.py --verify CSSC.2452 2026-01-10 2026-03-10
+
 What it flags, and why each one matters:
   - STILL OPEN: no Stop event recorded. Expected in small numbers for very
     recent starts; a red flag if the start is old (see the Summary page's
@@ -43,7 +51,7 @@ What it flags, and why each one matters:
 import sys
 import os
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 os.environ.setdefault("DISCHARGE_AUTO_SYNC", "0")
 
@@ -159,6 +167,74 @@ def deep_dive(watercourse_query):
         print()
 
 
+def verify_live(permit, start_str, end_str):
+    """Re-fetch this permit's raw Start/Stop events straight from Thames
+    Water's live API for [start_str, end_str) and compare against what's
+    stored locally. Thames Water's API has no per-permit filter, so this
+    pulls every national event in the window and filters client-side --
+    fine for a one-off manual check, unlike the full crawler which chunks
+    to stay polite over a much longer range.
+
+    This is the decisive check for a single suspiciously long interval:
+    if the live API shows intervening Start/Stop events for this permit
+    that our stored data doesn't have, that's a real ingestion gap (fix:
+    re-run scripts/backfill_discharge_history.py --repair over this
+    range). If the live API agrees there's nothing in between, the long
+    interval is genuine -- Thames Water's own data really does show one
+    continuous discharge, not a rendering or pairing bug."""
+    backfill = appmod._discharge_backfill
+    range_start = date.fromisoformat(start_str)
+    range_end = date.fromisoformat(end_str)
+    params = {"dateStart": range_start.isoformat(), "dateEnd": range_end.isoformat()}
+
+    print(f"Fetching live Start/Stop events for {range_start}..{range_end} (all permits, then filtering to {permit})...")
+    starts, start_pages = backfill.fetch_all_pages(backfill.BASE + "/alerts", dict(params, alertType="Start"))
+    stops, stop_pages = backfill.fetch_all_pages(backfill.BASE + "/alerts", dict(params, alertType="Stop"))
+    print(f"  {len(starts)} starts ({start_pages} pages), {len(stops)} stops ({stop_pages} pages) nationally\n")
+
+    events = []
+    for item in starts:
+        if item.get("permitNumber") == permit and item.get("datetime"):
+            events.append((backfill.parse_dt(item["datetime"]), "START"))
+    for item in stops:
+        if item.get("permitNumber") == permit and item.get("datetime"):
+            events.append((backfill.parse_dt(item["datetime"]), "STOP"))
+    events.sort(key=lambda e: e[0])
+
+    print(f"=== LIVE API events for {permit} in this window: {len(events)} ===")
+    for dt, kind in events:
+        print(f"  {dt.isoformat()}  {kind}")
+    print()
+
+    conn = backfill.db_connect()
+    try:
+        rows = conn.execute(
+            "SELECT start_utc, stop_utc FROM discharge_events WHERE permit = ? "
+            "AND start_utc < ? AND (stop_utc IS NULL OR stop_utc >= ?) ORDER BY start_utc ASC",
+            (permit, f"{range_end.isoformat()}T00:00:00+00:00", f"{range_start.isoformat()}T00:00:00+00:00"),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    print(f"=== STORED events for {permit} overlapping this window: {len(rows)} ===")
+    for start_utc, stop_utc in rows:
+        print(f"  {start_utc}  ->  {stop_utc or 'NULL'}")
+    print()
+
+    if len(events) > len(rows) * 2:
+        print(
+            "MISMATCH: the live API reports more Start/Stop events in this window than are "
+            "stored -- our backfill likely dropped intervening events, artificially extending "
+            "a stored interval. Re-run: python3 scripts/backfill_discharge_history.py --repair "
+            f"{range_start.isoformat()} {range_end.isoformat()}"
+        )
+    else:
+        print(
+            "MATCH: the live API doesn't show any intervening events beyond what's stored -- "
+            "this long interval appears to be genuine, not a pairing/ingestion bug."
+        )
+
+
 def full_audit():
     conn = appmod._discharge_backfill.db_connect()
     try:
@@ -209,6 +285,8 @@ def full_audit():
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "--all":
         full_audit()
+    elif len(sys.argv) == 5 and sys.argv[1] == "--verify":
+        verify_live(sys.argv[2], sys.argv[3], sys.argv[4])
     elif len(sys.argv) == 2:
         deep_dive(sys.argv[1])
     else:
