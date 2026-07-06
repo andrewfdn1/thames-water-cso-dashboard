@@ -1373,11 +1373,11 @@ def _prewarm():
         print(f"Pre-warm error [discharge_windows]: {e!r}")
 
 
-if __name__ == "__main__":
-    app.run(debug=os.environ.get("FLASK_DEBUG", "0") == "1")
-
-
 threading.Thread(target=_prewarm, daemon=True).start()
 
 if _DISCHARGE_AUTO_SYNC_ENABLED:
     threading.Thread(target=_discharge_history_sync_loop, daemon=True).start()
+
+
+if __name__ == "__main__":
+    app.run(debug=os.environ.get("FLASK_DEBUG", "0") == "1")
