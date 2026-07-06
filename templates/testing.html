@@ -39,8 +39,38 @@
     Each chart also overlays discharge hours per week (right-hand axis) for one CSO zone at a time &mdash; pick a zone from the dropdown. National and individual watercourses are on very different scales, so only one is shown at once.
   </p>
 
+  <form method="get" class="date-range-form">
+    <label>
+      From
+      <select name="from_year">
+        {% for y in year_options %}
+        <option value="{{ y }}" {{ 'selected' if y == range_start.year else '' }}>{{ y }}</option>
+        {% endfor %}
+      </select>
+      <select name="from_month">
+        {% for m, name in month_names %}
+        <option value="{{ m }}" {{ 'selected' if m == range_start.month else '' }}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      To
+      <select name="to_year">
+        {% for y in year_options %}
+        <option value="{{ y }}" {{ 'selected' if y == range_end.year else '' }}>{{ y }}</option>
+        {% endfor %}
+      </select>
+      <select name="to_month">
+        {% for m, name in month_names %}
+        <option value="{{ m }}" {{ 'selected' if m == range_end.month else '' }}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Apply</button>
+  </form>
+
   {% for key, label in [('frbc', 'FRBC'), ('ptrc', 'PTRC')] %}
-  <div class="section-title">{{ label }} &mdash; E coli readings and discharge, last 12 months</div>
+  <div class="section-title">{{ label }} &mdash; E coli readings and discharge, {{ range_start.strftime('%b %Y') }}&ndash;{{ range_end.strftime('%b %Y') }}</div>
   {% if chart_has_data[key] %}
   <div class="zone-select-row">
     <label for="zone-select-{{ key }}">Discharge zone:</label>
@@ -50,7 +80,7 @@
     <canvas id="chart-{{ key }}" height="90"></canvas>
   </div>
   {% else %}
-  <p style="color:var(--text-muted); font-size:0.85rem;">No readings in the last 12 months.</p>
+  <p style="color:var(--text-muted); font-size:0.85rem;">No readings in this date range.</p>
   {% endif %}
   {% endfor %}
 </main>

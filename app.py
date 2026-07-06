@@ -822,18 +822,24 @@ def get_water_quality():
 # ---------------------------------------------------------------------------
 
 _DISCHARGE_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "discharge_history.db")
-_CHART_WEEKS = _WQ_HISTORY_DAYS // 7   # 52 weeks to match the E. coli chart window
 
 
-def _week_buckets():
-    """Weekly (start, end) date pairs, end exclusive, oldest first. The most
-    recent bucket ends *tomorrow*, not today -- with an exclusive end date,
-    ending exactly on today would put today's own events outside every
-    bucket, silently dropping the most current data."""
-    end = date.today() + timedelta(days=1)
+def _week_buckets(range_start=None, range_end=None):
+    """Weekly (start, end) date pairs, end exclusive, oldest first, spanning
+    [range_start, range_end]. Defaults to the last _WQ_HISTORY_DAYS days
+    ending today when no range is given. The final bucket's end is always
+    one day past range_end -- with an exclusive end date, ending exactly on
+    the last day would put that day's own events outside every bucket,
+    silently dropping the most current data when range_end is today."""
+    if range_end is None:
+        range_end = date.today()
+    if range_start is None:
+        range_start = range_end - timedelta(days=_WQ_HISTORY_DAYS)
+
+    end = range_end + timedelta(days=1)
     buckets = []
-    for _ in range(_CHART_WEEKS):
-        start = end - timedelta(days=7)
+    while end > range_start:
+        start = max(range_start, end - timedelta(days=7))
         buckets.append((start, end))
         end = start
     buckets.reverse()
@@ -869,7 +875,7 @@ def _load_discharge_intervals():
 _DISCHARGE_ZONE_LIMIT = 15   # cap on individual watercourse toggle options, busiest first
 
 
-def get_total_discharge_weekly():
+def get_total_discharge_weekly(range_start=None, range_end=None):
     """Weekly discharge hours per zone, always excluding Tideway Tunnel
     permits (captured, never reaches a river) -- same exclusion the
     Summary page's subtotal already applies. Returns a "National (excl.
@@ -881,10 +887,18 @@ def get_total_discharge_weekly():
     them unreadable plotted together; letting the page pick one zone at a
     time keeps the chart's axis meaningful for whichever is selected.
 
+    range_start/range_end select an arbitrary date window (e.g. from the
+    Testing page's year/month picker) instead of the default last-12-months;
+    cached per distinct range since different windows are genuinely
+    different results, not the same cache entry.
+
     Watercourse classification comes from the *current* monitor list, since
     it's a fixed site property, not something that varies week to week; a
     permit retired before today's monitor list won't be classifiable and
     is excluded from every zone (including National)."""
+    buckets = _week_buckets(range_start, range_end)
+    cache_key = f"total_discharge_weekly:{buckets[0][0].isoformat()}:{buckets[-1][1].isoformat()}"
+
     def fetch():
         monitors, _ = get_all_monitors()
         monitors = monitors or {}
@@ -896,7 +910,6 @@ def get_total_discharge_weekly():
 
         intervals = _load_discharge_intervals()
         now_utc = datetime.now(timezone.utc)
-        buckets = _week_buckets()
         n = len(buckets)
         window_start = datetime.combine(buckets[0][0], datetime.min.time(), tzinfo=timezone.utc)
 
@@ -934,7 +947,7 @@ def get_total_discharge_weekly():
             "zones":       zones,
         }
 
-    return get_cached("total_discharge_weekly", fetch, ttl_seconds=_WQ_REFRESH_SECONDS)
+    return get_cached(cache_key, fetch, ttl_seconds=_WQ_REFRESH_SECONDS)
 
 
 def _bucket_ecoli_readings(history, buckets):
@@ -973,15 +986,64 @@ def monitors_view():
     return render_template("monitors.html", **data)
 
 
+_MONTH_NAMES = [
+    (1, "Jan"), (2, "Feb"), (3, "Mar"), (4, "Apr"), (5, "May"), (6, "Jun"),
+    (7, "Jul"), (8, "Aug"), (9, "Sep"), (10, "Oct"), (11, "Nov"), (12, "Dec"),
+]
+_TESTING_EARLIEST_YEAR = 2022   # discharge history only goes back to late Dec 2022
+
+
+def _month_bounds(year, month):
+    start = date(year, month, 1)
+    end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    return start, end - timedelta(days=1)
+
+
+def _parse_testing_range():
+    """Read from_year/from_month/to_year/to_month query params (the Testing
+    page's date range picker) into an actual (start, end) date range,
+    defaulting to the last _WQ_HISTORY_DAYS days ending today when a param
+    is absent or invalid. Clamps the end to today and swaps the bounds if
+    from ends up after to, rather than erroring on a nonsensical range."""
+    today = date.today()
+    default_start = today - timedelta(days=_WQ_HISTORY_DAYS)
+
+    try:
+        range_start, _ = _month_bounds(
+            int(request.args.get("from_year", default_start.year)),
+            int(request.args.get("from_month", default_start.month)),
+        )
+    except (ValueError, TypeError):
+        range_start = default_start
+
+    try:
+        _, range_end = _month_bounds(
+            int(request.args.get("to_year", today.year)),
+            int(request.args.get("to_month", today.month)),
+        )
+    except (ValueError, TypeError):
+        range_end = today
+
+    range_end = min(range_end, today)
+    if range_start > range_end:
+        range_start, range_end = range_end, range_start
+    return range_start, range_end
+
+
 @app.route("/testing")
 def testing_view():
     water_quality, water_quality_fetched_at = get_water_quality()
     water_quality = water_quality or {"frbc": None, "ptrc": None}
 
-    buckets = _week_buckets()
-    week_labels = [b[0].strftime("%-d %b") for b in buckets]
+    range_start, range_end = _parse_testing_range()
+    buckets = _week_buckets(range_start, range_end)
+    spans_multiple_years = range_start.year != range_end.year
+    week_labels = [
+        b[0].strftime("%-d %b %Y") if spans_multiple_years else b[0].strftime("%-d %b")
+        for b in buckets
+    ]
 
-    discharge_weekly, discharge_fetched_at = get_total_discharge_weekly()
+    discharge_weekly, discharge_fetched_at = get_total_discharge_weekly(range_start, range_end)
     discharge_zones = (discharge_weekly or {}).get("zones") or {}
 
     chart_data = {}
@@ -1000,6 +1062,10 @@ def testing_view():
         chart_has_data=chart_has_data,
         discharge_zones=discharge_zones,
         discharge_fetched_at=discharge_fetched_at,
+        range_start=range_start,
+        range_end=range_end,
+        month_names=_MONTH_NAMES,
+        year_options=list(range(_TESTING_EARLIEST_YEAR, date.today().year + 1)),
     )
 
 
