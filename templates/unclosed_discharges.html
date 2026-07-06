@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Unclosed discharge records — Thames Water CSO Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+{% include "_nav.html" with context %}
+<main>
+  <div class="section-title">Unclosed discharge records</div>
+  <p style="color:var(--text-secondary); font-size:0.9rem; max-width:70ch;">
+    These are discharge Start events with no matching Stop event in Thames Water's own
+    discharge/alerts data, at least {{ min_age_days }} day{{ 's' if min_age_days != 1 else '' }} old
+    &mdash; old enough that "still discharging" is implausible. Our own system automatically
+    re-checks each of these periodically (up to a bounded number of attempts) in case the
+    missing Stop simply hadn't been published yet; anything still listed here has survived
+    that and looks like a genuine gap in Thames Water's published data.
+  </p>
+
+  {% if report %}
+  <p style="color:var(--text-muted); font-size:0.85rem;">
+    {{ report|length }} record{{ 's' if report|length != 1 else '' }} &middot; refreshed {{ fetched_at }}
+  </p>
+  <table style="margin-bottom:16px;">
+    <thead>
+      <tr>
+        <th>Permit</th>
+        <th>Site name</th>
+        <th>Watercourse</th>
+        <th>Start (UTC)</th>
+        <th class="num">Days open</th>
+        <th class="num">Retry attempts</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in report %}
+      <tr>
+        <td>{{ r.permit }}</td>
+        <td>{{ r.name }}</td>
+        <td>{{ r.water }}</td>
+        <td>{{ r.start_str }}</td>
+        <td class="num">{{ r.days_open }}</td>
+        <td class="num">{{ r.retry_count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="section-title">Copy for email to Thames Water</div>
+  <p style="color:var(--text-muted); font-size:0.85rem; margin-top:-8px;">
+    Plain-text summary of the table above, ready to select and paste into an email.
+  </p>
+  <textarea id="report-text" class="report-textarea" readonly>{{ report_text }}</textarea>
+  <br>
+  <button type="button" class="copy-button" id="copy-btn">Copy to clipboard</button>
+  {% else %}
+  <p style="color:var(--text-muted); font-size:0.9rem;">No unclosed discharge records currently flagged.</p>
+  {% endif %}
+</main>
+<footer>
+  Source: <a href="https://docs.api.thameswater.co.uk/" target="_blank">Thames Water Open Data API v2</a> (discharge/alerts)
+</footer>
+<script>
+  var copyBtn = document.getElementById('copy-btn');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', function () {
+      var textarea = document.getElementById('report-text');
+      textarea.select();
+      navigator.clipboard.writeText(textarea.value).then(function () {
+        copyBtn.textContent = 'Copied!';
+        setTimeout(function () { copyBtn.textContent = 'Copy to clipboard'; }, 2000);
+      }).catch(function () {
+        document.execCommand('copy');
+      });
+    });
+  }
+</script>
+</body>
+</html>

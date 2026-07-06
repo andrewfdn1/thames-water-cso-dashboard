@@ -1021,6 +1021,69 @@ def _discharge_history_sync_loop():
         time.sleep(_DISCHARGE_SYNC_INTERVAL_SECONDS)
 
 
+def get_unclosed_discharge_report():
+    """Discharge events with no Stop event recorded, old enough that "still
+    discharging" is implausible (same cutoff the auto-sync retry uses) --
+    these are most likely gaps in Thames Water's own published data rather
+    than genuinely ongoing discharges. Surfaced as a Summary page warning
+    and a full report formatted to paste into an email to Thames Water."""
+    def fetch():
+        conn = _discharge_backfill.db_connect()
+        try:
+            cutoff = (datetime.now(timezone.utc).date() - timedelta(days=_DISCHARGE_UNCLOSED_MIN_AGE_DAYS)).isoformat()
+            rows = conn.execute(
+                """
+                SELECT permit, start_utc, retry_count FROM discharge_events
+                WHERE stop_utc IS NULL AND start_utc < ?
+                ORDER BY start_utc ASC
+                """,
+                (cutoff,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        monitors, _ = get_all_monitors()
+        monitors = monitors or {}
+        now_utc = datetime.now(timezone.utc)
+
+        report = []
+        for permit, start_utc, retry_count in rows:
+            start_dt = _parse_dt(start_utc)
+            m = monitors.get(permit)
+            report.append({
+                "permit":      permit,
+                "name":        m["name"] if m else "Unknown (not in current monitor list)",
+                "water":       m["water"] if m else "Unknown",
+                "start_str":   start_dt.strftime("%Y-%m-%d %H:%M"),
+                "days_open":   (now_utc - start_dt).days,
+                "retry_count": retry_count,
+            })
+        return report
+
+    return get_cached("unclosed_discharge_report", fetch, ttl_seconds=_WQ_REFRESH_SECONDS)
+
+
+def _format_unclosed_report_text(report, fetched_at):
+    lines = [
+        "Discharge event data query - missing Stop records",
+        "",
+        "The following permitted discharge monitors show a Start event with no "
+        "matching Stop event in the Thames Water Discharge to Environment (DTE) "
+        "Open Data API discharge/alerts feed, despite enough time having passed "
+        "that the discharge is unlikely to still be ongoing. Could you confirm "
+        "whether these are genuine ongoing discharges, or a gap in the published data?",
+        "",
+        f"{'Permit':<15}{'Site name':<35}{'Watercourse':<20}{'Start (UTC)':<18}{'Days open':<11}{'Retries'}",
+    ]
+    for r in report:
+        lines.append(
+            f"{r['permit']:<15}{r['name'][:33]:<35}{r['water'][:18]:<20}{r['start_str']:<18}{r['days_open']:<11}{r['retry_count']}"
+        )
+    lines.append("")
+    lines.append(f"Generated {fetched_at or datetime.now(timezone.utc).strftime('%H:%M UTC')} from the Thames Water Open Data API (discharge/alerts), via the Thames Water CSO Dashboard.")
+    return "\n".join(lines)
+
+
 _DISCHARGE_ZONE_LIMIT = 15   # cap on individual watercourse toggle options, busiest first
 
 
@@ -1119,7 +1182,23 @@ def _bucket_ecoli_readings(history, buckets):
 @app.route("/")
 def index():
     data = build_dataset()
+    unclosed_report, _ = get_unclosed_discharge_report()
+    data["unclosed_count"] = len(unclosed_report or [])
     return render_template("index.html", **data)
+
+
+@app.route("/unclosed-discharges")
+def unclosed_discharges_view():
+    report, fetched_at = get_unclosed_discharge_report()
+    report = report or []
+    report_text = _format_unclosed_report_text(report, fetched_at)
+    return render_template(
+        "unclosed_discharges.html",
+        report=report,
+        fetched_at=fetched_at,
+        report_text=report_text,
+        min_age_days=_DISCHARGE_UNCLOSED_MIN_AGE_DAYS,
+    )
 
 
 @app.route("/map")

@@ -9,6 +9,13 @@
 <body>
 {% include "_nav.html" with context %}
 <main>
+  {% if unclosed_count > 0 %}
+  <div class="data-warning">
+    {{ unclosed_count }} discharge record{{ 's' if unclosed_count != 1 else '' }} in our history appear to be missing a Stop event from Thames Water's own data.
+    <a href="/unclosed-discharges">View details &rarr;</a>
+  </div>
+  {% endif %}
+
   <div class="section-title">Water quality &mdash; latest E coli readings</div>
   <table style="margin-bottom:28px;">
     <thead>
