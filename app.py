@@ -1084,7 +1084,6 @@ def _format_unclosed_report_text(report, fetched_at):
     return "\n".join(lines)
 
 
-_DISCHARGE_ZONE_LIMIT = 15   # cap on individual watercourse toggle options, busiest first
 _DISCHARGE_OPEN_MAX_ASSUMED_HOURS = 48   # cap on how long a still-open (no Stop yet) record
                                           # is assumed to keep discharging; matches the ~2-day
                                           # threshold used elsewhere for "too old to plausibly
@@ -1095,13 +1094,14 @@ def get_total_discharge_weekly(range_start=None, range_end=None):
     """Weekly discharge hours per zone, always excluding Tideway Tunnel
     permits (captured, never reaches a river) -- same exclusion the
     Summary page's subtotal already applies. Returns a "National (excl.
-    Tideway Tunnel)" total plus the busiest individual watercourses as
-    separate toggleable series, matching the receiving-watercourse
-    breakdown the Summary page already shows -- since National mixes in
-    every river in the country, it's on a totally different scale to any
-    single watercourse (thousands of hours/week vs a handful), which makes
-    them unreadable plotted together; letting the page pick one zone at a
-    time keeps the chart's axis meaningful for whichever is selected.
+    Tideway Tunnel)" total plus every individual watercourse with any
+    discharge in the selected period as its own toggleable series -- no cap,
+    so a less-busy tributary never silently disappears from the list --
+    since National mixes in every river in the country, it's on a totally
+    different scale to any single watercourse (thousands of hours/week vs a
+    handful), which makes them unreadable plotted together; letting the
+    page pick one zone at a time keeps the chart's axis meaningful for
+    whichever is selected.
 
     range_start/range_end select an arbitrary date window (e.g. from the
     Testing page's year/month picker) instead of the default last-12-months;
@@ -1119,11 +1119,9 @@ def get_total_discharge_weekly(range_start=None, range_end=None):
     Watercourse classification comes from the *current* monitor list, since
     it's a fixed site property, not something that varies week to week; a
     permit retired before today's monitor list won't be classifiable and
-    is excluded from every zone (including National). "River Thames" is
-    always included as its own zone regardless of the busiest-N cut, since
-    it's the default comparison for these Thames-side testing sites and
-    shouldn't silently disappear if a given period's individual tributary
-    totals happen to outrank it."""
+    is excluded from every zone (including National). Zones are sorted
+    alphabetically after National/River Thames, to make a specific
+    watercourse easy to find in what can be a long list."""
     buckets = _week_buckets(range_start, range_end)
     cache_key = f"total_discharge_weekly:{buckets[0][0].isoformat()}:{buckets[-1][1].isoformat()}"
 
@@ -1179,13 +1177,19 @@ def get_total_discharge_weekly(range_start=None, range_end=None):
                     national_secs[i] += secs
                     secs_by_zone[zone][i] += secs
 
-        busiest = sorted(secs_by_zone.items(), key=lambda kv: -sum(kv[1]))[:_DISCHARGE_ZONE_LIMIT]
-
+        # Every watercourse with any discharge in this period gets a zone --
+        # no cap, so nothing (e.g. a less-busy tributary like River Brent)
+        # silently disappears from the dropdown just for not being one of
+        # the busiest. National first, River Thames pinned second as the
+        # default comparison, everything else alphabetical so a specific
+        # watercourse is easy to find in what can be a long list.
         zones = {"National (excl. Tideway Tunnel)": [round(s / 3600, 2) for s in national_secs]}
-        for name, secs in busiest:
-            zones[name] = [round(s / 3600, 2) for s in secs]
-        if "River Thames" in secs_by_zone and "River Thames" not in zones:
+        if "River Thames" in secs_by_zone:
             zones["River Thames"] = [round(s / 3600, 2) for s in secs_by_zone["River Thames"]]
+        for name in sorted(secs_by_zone.keys()):
+            if name == "River Thames":
+                continue
+            zones[name] = [round(s / 3600, 2) for s in secs_by_zone[name]]
 
         return {
             "week_starts": [b[0].isoformat() for b in buckets],
