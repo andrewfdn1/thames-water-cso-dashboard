@@ -65,9 +65,10 @@ def db_connect():
     conn = db.connect(DB_PATH, env_prefix="TURSO_DISCHARGE")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS discharge_events (
-            permit    TEXT NOT NULL,
-            start_utc TEXT NOT NULL,
-            stop_utc  TEXT,
+            permit      TEXT NOT NULL,
+            start_utc   TEXT NOT NULL,
+            stop_utc    TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (permit, start_utc)
         )
     """)

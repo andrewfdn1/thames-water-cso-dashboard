@@ -16,6 +16,10 @@ import os
 
 import db
 
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"))
+import backfill_discharge_history as _discharge_backfill  # noqa: E402 -- shares fetch/pair/upsert logic with the auto-sync below
+
 app = Flask(__name__)
 
 
@@ -851,9 +855,10 @@ def _load_discharge_intervals():
     try:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS discharge_events (
-                permit    TEXT NOT NULL,
-                start_utc TEXT NOT NULL,
-                stop_utc  TEXT,
+                permit      TEXT NOT NULL,
+                start_utc   TEXT NOT NULL,
+                stop_utc    TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (permit, start_utc)
             )
         """)
@@ -870,6 +875,150 @@ def _load_discharge_intervals():
             continue
         intervals.append((permit, start_dt, stop_dt))
     return intervals
+
+
+# ---------------------------------------------------------------------------
+# Discharge history auto-sync -- makes discharge_history.db self-updating
+# instead of depending on someone manually re-running the backfill script.
+# Runs as a background thread (same pattern as _prewarm), reusing the
+# fetch/pair/upsert logic from scripts/backfill_discharge_history.py so
+# there's one implementation of "how to safely pull and store this data",
+# not two.
+#
+# Deliberately separate from that script's own backfill_progress checkpoint:
+# this only ever does short, recent catch-ups (a day or two), never the
+# full multi-year historical crawl -- that stays a deliberate, manual,
+# one-off action. A fresh environment with no prior sync history (e.g. a
+# first deploy on Render) should not silently kick off an hours-long
+# historical pull in the background.
+#
+# API-behaviour notes this respects:
+#   - Docs: new data appears roughly every 30 minutes, with per-sensor and
+#     processing delay meaning a discharge is normally visible within an
+#     hour of starting. Catching up from (last_synced - 1 day) is generous
+#     headroom against that, and syncing every 30 min matches the API's own
+#     update cadence -- no point polling faster than the source refreshes.
+#   - Docs: 5 requests/second/user is the documented (not yet enforced)
+#     rate limit. A sync cycle is normally 1-2 short chunks plus a bounded
+#     handful of unclosed-record rechecks -- comparable to the live app's
+#     existing 30-day discharge_windows pull, not an additional heavy load.
+# ---------------------------------------------------------------------------
+
+_DISCHARGE_AUTO_SYNC_ENABLED = os.environ.get("DISCHARGE_AUTO_SYNC", "1") != "0"
+_DISCHARGE_SYNC_INTERVAL_SECONDS = 1800   # matches the API's own ~30 min update cadence
+_DISCHARGE_SYNC_CATCHUP_BUFFER_DAYS = 1   # re-check the day before "last synced" too, for late-arriving data
+_DISCHARGE_UNCLOSED_MAX_RETRIES = 5       # give up on any single record after this many failed resolve attempts
+_DISCHARGE_UNCLOSED_BATCH_LIMIT = 20      # cap on how many still-open records get rechecked per sync cycle
+_DISCHARGE_UNCLOSED_MIN_AGE_DAYS = 2      # only recheck records old enough that "still discharging" is implausible
+
+
+def _ensure_sync_schema(conn):
+    """Add what the auto-sync needs on top of the backfill script's base
+    schema: a retry counter per event (so a permanently-unresolvable record
+    stops being retried forever) and its own progress checkpoint, kept
+    separate from backfill_progress so the two never interact."""
+    try:
+        conn.execute("ALTER TABLE discharge_events ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass   # column already exists
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS discharge_sync_progress (
+            id           INTEGER PRIMARY KEY CHECK (id = 0),
+            last_synced  TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        )
+    """)
+
+
+def _load_sync_progress(conn):
+    row = conn.execute("SELECT last_synced FROM discharge_sync_progress WHERE id = 0").fetchone()
+    if row:
+        return date.fromisoformat(row[0])
+    # No prior auto-sync yet -- start from a conservative recent window,
+    # not the full historical range. The one-off manual backfill script is
+    # what's meant to establish deep history; this only ever keeps it current.
+    return datetime.now(timezone.utc).date() - timedelta(days=_DISCHARGE_SYNC_CATCHUP_BUFFER_DAYS)
+
+
+def _save_sync_progress(conn, synced_through):
+    now = datetime.now(timezone.utc).isoformat()
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO discharge_sync_progress (id, last_synced, updated_at)
+            VALUES (0, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET last_synced = excluded.last_synced, updated_at = excluded.updated_at
+            """,
+            (synced_through.isoformat(), now),
+        )
+
+
+def _retry_unclosed_discharge_records(conn, pending):
+    """Bounded attempt to close out long-open records: a permit with no
+    Stop event yet is either genuinely still discharging (recent -- left
+    alone) or sitting on a gap in the source data (old -- worth another
+    try, but not forever). Two independent caps, per the requirement that
+    this must not turn into an unbounded loop: a per-record retry_count
+    ceiling, and a per-cycle limit on how many records get attempted at
+    all."""
+    cutoff = (datetime.now(timezone.utc).date() - timedelta(days=_DISCHARGE_UNCLOSED_MIN_AGE_DAYS)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT permit, start_utc FROM discharge_events
+        WHERE stop_utc IS NULL AND start_utc < ? AND retry_count < ?
+        ORDER BY start_utc ASC LIMIT ?
+        """,
+        (cutoff, _DISCHARGE_UNCLOSED_MAX_RETRIES, _DISCHARGE_UNCLOSED_BATCH_LIMIT),
+    ).fetchall()
+
+    today = datetime.now(timezone.utc).date()
+    for permit, start_utc in rows:
+        start_date = datetime.fromisoformat(start_utc).date()
+        window_start = start_date - timedelta(days=1)
+        window_end = min(start_date + timedelta(days=14), today)
+        if window_end <= window_start:
+            continue
+
+        _discharge_backfill.run_chunks(conn, pending, window_start, window_end, update_progress=False)
+
+        still_open = conn.execute(
+            "SELECT 1 FROM discharge_events WHERE permit = ? AND start_utc = ? AND stop_utc IS NULL",
+            (permit, start_utc),
+        ).fetchone()
+        if still_open:
+            with conn:
+                conn.execute(
+                    "UPDATE discharge_events SET retry_count = retry_count + 1 WHERE permit = ? AND start_utc = ?",
+                    (permit, start_utc),
+                )
+
+
+def _sync_discharge_history_once():
+    conn = _discharge_backfill.db_connect()
+    try:
+        _ensure_sync_schema(conn)
+        pending = _discharge_backfill.load_pending(conn)
+        today = datetime.now(timezone.utc).date()
+
+        last_synced = _load_sync_progress(conn)
+        catchup_start = max(_discharge_backfill.GO_LIVE_DATE, last_synced - timedelta(days=_DISCHARGE_SYNC_CATCHUP_BUFFER_DAYS))
+        if catchup_start < today:
+            print(f"INFO [discharge-sync]: catching up {catchup_start.isoformat()}..{today.isoformat()}")
+            _discharge_backfill.run_chunks(conn, pending, catchup_start, today, update_progress=False)
+            _save_sync_progress(conn, today)
+
+        _retry_unclosed_discharge_records(conn, pending)
+    finally:
+        conn.close()
+
+
+def _discharge_history_sync_loop():
+    while True:
+        try:
+            _sync_discharge_history_once()
+        except Exception as e:
+            print(f"ERROR [discharge-sync]: {e!r}")
+        time.sleep(_DISCHARGE_SYNC_INTERVAL_SECONDS)
 
 
 _DISCHARGE_ZONE_LIMIT = 15   # cap on individual watercourse toggle options, busiest first
@@ -1117,3 +1266,6 @@ if __name__ == "__main__":
 
 
 threading.Thread(target=_prewarm, daemon=True).start()
+
+if _DISCHARGE_AUTO_SYNC_ENABLED:
+    threading.Thread(target=_discharge_history_sync_loop, daemon=True).start()
