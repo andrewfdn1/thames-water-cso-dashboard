@@ -1,0 +1,16 @@
+[Unit]
+Description=Cloudflare quick tunnel for Thames Water CSO Dashboard
+After=network-online.target thames-cso-dashboard.service
+Wants=network-online.target
+Requires=thames-cso-dashboard.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cloudflared tunnel --url http://127.0.0.1:8000
+StandardOutput=append:/opt/thames-cso-dashboard/logs/cloudflared.log
+StandardError=append:/opt/thames-cso-dashboard/logs/cloudflared.log
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

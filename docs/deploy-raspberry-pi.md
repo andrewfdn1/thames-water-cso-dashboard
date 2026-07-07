@@ -28,29 +28,39 @@ self-hosted runner (see below) -- bootstrap-pi.sh grants that user
 passwordless sudo for exactly one command (`systemctl restart
 thames-cso-dashboard.service`), nothing broader.
 
-## Cloudflare Tunnel (public HTTPS access)
+## Cloudflare quick tunnel (public HTTPS access, no domain/account needed)
+
+Using a free quick tunnel for now: no Cloudflare account, no login, no
+DNS -- `cloudflared` just gives you a random `https://<random>.trycloudflare.com`
+URL. TLS is still handled entirely by Cloudflare's edge; gunicorn only
+ever listens on `127.0.0.1:8000`, never exposed directly.
 
 ```bash
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb -o cloudflared.deb
 # use cloudflared-linux-arm.deb instead if `uname -m` says armv7l/armhf, not aarch64
 sudo dpkg -i cloudflared.deb
 
-cloudflared tunnel login                              # opens a browser link, pick your domain's zone
-cloudflared tunnel create thames-cso-dashboard
-cloudflared tunnel route dns thames-cso-dashboard cso.yourdomain.com
+sudo cp deploy/cloudflared-quicktunnel.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now cloudflared-quicktunnel
 
-sudo mkdir -p /etc/cloudflared
-cp deploy/cloudflared-config.yml.example /etc/cloudflared/config.yml
-# edit /etc/cloudflared/config.yml: fill in the real tunnel ID (from the
-# `tunnel create` output) and your real hostname
-
-sudo cloudflared service install
-sudo systemctl enable --now cloudflared
+# find the assigned URL (changes every time this service restarts):
+sudo systemctl status cloudflared-quicktunnel --no-pager | grep trycloudflare
+# or: grep trycloudflare /opt/thames-cso-dashboard/logs/cloudflared.log | tail -1
 ```
 
-The dashboard is now live at `https://cso.yourdomain.com`, TLS handled
-entirely by Cloudflare's edge -- gunicorn only ever listens on
-`127.0.0.1:8000`, never exposed directly.
+**Trade-off to know about:** the URL is only stable as long as the
+service keeps running -- it changes on every restart (Pi reboot,
+`cloudflared` crash-and-recover, etc). Since this is still a testing
+phase with nobody else using the link yet, that's a fine trade for
+avoiding any domain cost or Cloudflare account setup right now. Whenever
+you're ready for a permanent link, moving to a real domain later is a
+~15 minute change (new named tunnel + DNS record + swap this systemd
+unit for one using `deploy/cloudflared-config.yml.example`) with zero
+changes to the app itself -- see that file for the upgrade path.
+
+If the URL changes, remember to update the `PI_DASHBOARD_URL` secret
+(below) so the log-fetching workflow keeps working.
 
 ## Auto-deploy on every push (GitHub Actions self-hosted runner)
 
