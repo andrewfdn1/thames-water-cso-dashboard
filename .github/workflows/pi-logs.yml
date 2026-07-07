@@ -24,16 +24,21 @@ jobs:
             exit 1
           fi
 
+          # Cloudflare's default edge bot-protection blocks curl's default
+          # User-Agent even for a free quick tunnel -- same reason app.py's
+          # own outbound fetches (Thames Water, Google Sheets) spoof one.
+          CURL="curl -sf -A Mozilla/5.0"
+
           echo "## /ping"
-          curl -sf "${PI_DASHBOARD_URL}/ping" || echo "::warning::/ping did not return success"
+          $CURL "${PI_DASHBOARD_URL}/ping" || echo "::warning::/ping did not return success"
 
           echo ""
           echo "## /data snapshot"
-          curl -sf "${PI_DASHBOARD_URL}/data?cachebust=$(date +%s)" \
+          $CURL "${PI_DASHBOARD_URL}/data?cachebust=$(date +%s)" \
             | jq '{total_monitors, total_discharging, monitors_fetched_at, windows_fetched_at, total_hours_by_window, waterways: (.waterways // [] | .[0:3])}' \
             || echo "::warning::/data did not return valid JSON"
 
           echo ""
           echo "## Recent app logs (last ${LINES} lines)"
-          curl -sf "${PI_DASHBOARD_URL}/internal/logs?key=${PI_LOGS_KEY}&lines=${LINES}" \
+          $CURL "${PI_DASHBOARD_URL}/internal/logs?key=${PI_LOGS_KEY}&lines=${LINES}" \
             || echo "::error::Could not fetch /internal/logs -- check LOGS_KEY matches the Pi's .env and the tunnel is up"
