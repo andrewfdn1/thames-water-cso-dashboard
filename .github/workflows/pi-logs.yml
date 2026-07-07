@@ -24,21 +24,25 @@ jobs:
             exit 1
           fi
 
-          # Cloudflare's default edge bot-protection blocks curl's default
-          # User-Agent even for a free quick tunnel -- same reason app.py's
-          # own outbound fetches (Thames Water, Google Sheets) spoof one.
-          CURL="curl -sf -A Mozilla/5.0"
+          # Diagnostic mode: show the real HTTP status and response body
+          # instead of silently failing, since a plain success/failure
+          # check wasn't enough to explain why this fails from here but
+          # works fine from a real browser.
+          fetch() {
+            local label="$1" url="$2"
+            echo "## $label"
+            echo "URL: $url"
+            code=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                        -o /tmp/resp_body.txt -w "%{http_code}" --max-time 20 "$url" || echo "CURL_ERROR_$?")
+            echo "HTTP status: $code"
+            echo "--- response body (first 500 bytes) ---"
+            head -c 500 /tmp/resp_body.txt 2>/dev/null || echo "(no body captured)"
+            echo ""
+            echo "--- end body ---"
+          }
 
-          echo "## /ping"
-          $CURL "${PI_DASHBOARD_URL}/ping" || echo "::warning::/ping did not return success"
-
+          fetch "/ping" "${PI_DASHBOARD_URL}/ping"
           echo ""
-          echo "## /data snapshot"
-          $CURL "${PI_DASHBOARD_URL}/data?cachebust=$(date +%s)" \
-            | jq '{total_monitors, total_discharging, monitors_fetched_at, windows_fetched_at, total_hours_by_window, waterways: (.waterways // [] | .[0:3])}' \
-            || echo "::warning::/data did not return valid JSON"
-
+          fetch "/data snapshot" "${PI_DASHBOARD_URL}/data?cachebust=$(date +%s)"
           echo ""
-          echo "## Recent app logs (last ${LINES} lines)"
-          $CURL "${PI_DASHBOARD_URL}/internal/logs?key=${PI_LOGS_KEY}&lines=${LINES}" \
-            || echo "::error::Could not fetch /internal/logs -- check LOGS_KEY matches the Pi's .env and the tunnel is up"
+          fetch "Recent app logs (last ${LINES} lines)" "${PI_DASHBOARD_URL}/internal/logs?key=${PI_LOGS_KEY}&lines=${LINES}"
