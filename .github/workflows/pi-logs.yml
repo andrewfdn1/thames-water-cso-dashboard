@@ -1,0 +1,39 @@
+name: Pi logs and health check
+
+on:
+  workflow_dispatch:
+    inputs:
+      lines:
+        description: "Number of recent log lines to fetch"
+        required: false
+        default: "300"
+
+jobs:
+  fetch-logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch health check and recent logs from the Pi
+        env:
+          PI_DASHBOARD_URL: ${{ secrets.PI_DASHBOARD_URL }}
+          PI_LOGS_KEY: ${{ secrets.PI_LOGS_KEY }}
+          LINES: ${{ github.event.inputs.lines }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PI_DASHBOARD_URL:-}" ] || [ -z "${PI_LOGS_KEY:-}" ]; then
+            echo "::error::PI_DASHBOARD_URL and/or PI_LOGS_KEY secrets are not set. Add them under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          echo "## /ping"
+          curl -sf "${PI_DASHBOARD_URL}/ping" || echo "::warning::/ping did not return success"
+
+          echo ""
+          echo "## /data snapshot"
+          curl -sf "${PI_DASHBOARD_URL}/data?cachebust=$(date +%s)" \
+            | jq '{total_monitors, total_discharging, monitors_fetched_at, windows_fetched_at, total_hours_by_window, waterways: (.waterways // [] | .[0:3])}' \
+            || echo "::warning::/data did not return valid JSON"
+
+          echo ""
+          echo "## Recent app logs (last ${LINES} lines)"
+          curl -sf "${PI_DASHBOARD_URL}/internal/logs?key=${PI_LOGS_KEY}&lines=${LINES}" \
+            || echo "::error::Could not fetch /internal/logs -- check LOGS_KEY matches the Pi's .env and the tunnel is up"

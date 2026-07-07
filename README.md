@@ -69,7 +69,15 @@ startup-time prewarm behaviour as a cold deploy.
 
 ## Deployment
 
-This app is deployed to a **separate Render account** from frbc-tides,
+**Currently deployed on a Raspberry Pi** (self-hosted, alongside the
+kiosk display it also drives) rather than Render — see
+[`docs/deploy-raspberry-pi.md`](docs/deploy-raspberry-pi.md) for the full
+setup: Cloudflare Tunnel for public HTTPS, a systemd service, and a
+GitHub Actions self-hosted runner for auto-deploy on every push to
+`main`. The Render instructions below are kept for reference in case this
+ever moves back.
+
+This app was originally deployed to a **separate Render account** from frbc-tides,
 not the same workspace. Render's free tier grants 750 instance-hours/month
 *per workspace*, shared across every free web service in that workspace —
 so a second free service under the same account/workspace as frbc-tides

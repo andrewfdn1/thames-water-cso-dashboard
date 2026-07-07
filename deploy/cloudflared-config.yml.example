@@ -1,0 +1,13 @@
+# Copy this to ~/.cloudflared/config.yml on the Pi (the user cloudflared
+# runs as) and fill in the real tunnel ID and hostname produced by:
+#   cloudflared tunnel login
+#   cloudflared tunnel create thames-cso-dashboard
+#   cloudflared tunnel route dns thames-cso-dashboard cso.yourdomain.com
+
+tunnel: thames-cso-dashboard
+credentials-file: /home/pi/.cloudflared/<TUNNEL_ID>.json
+
+ingress:
+  - hostname: cso.yourdomain.com
+    service: http://127.0.0.1:8000
+  - service: http_status:404

@@ -1,0 +1,23 @@
+[Unit]
+Description=Thames Water CSO Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/thames-cso-dashboard
+EnvironmentFile=/opt/thames-cso-dashboard/.env
+ExecStart=/opt/thames-cso-dashboard/venv/bin/gunicorn app:app --timeout 180 --bind 127.0.0.1:8000
+StandardOutput=append:/opt/thames-cso-dashboard/logs/app.log
+StandardError=append:/opt/thames-cso-dashboard/logs/app.log
+Restart=on-failure
+RestartSec=5
+
+# Modest hardening -- the kiosk's headless Chromium is this Pi's primary
+# job, this service only gets what it needs.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
 from datetime import datetime, timezone, timedelta, date
 from collections import defaultdict
@@ -1033,13 +1033,39 @@ def sync_discharge_history_endpoint():
     rather than a background thread."""
     if not _DISCHARGE_AUTO_SYNC_ENABLED:
         return jsonify({"status": "disabled"}), 503
-    if _DISCHARGE_SYNC_KEY and request.args.get("key") != _DISCHARGE_SYNC_KEY:
+    if not _DISCHARGE_SYNC_KEY or request.args.get("key") != _DISCHARGE_SYNC_KEY:
         return jsonify({"error": "forbidden"}), 403
     try:
         _sync_discharge_history_once()
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"status": "error", "detail": repr(e)}), 500
+
+
+_LOGS_KEY = os.environ.get("LOGS_KEY")
+_APP_LOG_PATH = os.environ.get("APP_LOG_PATH", "/opt/thames-cso-dashboard/logs/app.log")
+
+
+@app.route("/internal/logs")
+def internal_logs_endpoint():
+    """Plain-text tail of the app's own log, gated behind a shared secret --
+    this is reachable over the public internet once deployed behind a
+    stable domain, unlike Render's obscure default subdomain, so (unlike
+    the sync endpoint above) there is deliberately no "open if unset"
+    fallback: a missing LOGS_KEY always forbids access rather than
+    defaulting to open."""
+    if not _LOGS_KEY or request.args.get("key") != _LOGS_KEY:
+        return jsonify({"error": "forbidden"}), 403
+    try:
+        n = max(1, min(2000, int(request.args.get("lines", 200))))
+    except ValueError:
+        n = 200
+    try:
+        with open(_APP_LOG_PATH, "r", errors="replace") as f:
+            lines = f.readlines()[-n:]
+    except FileNotFoundError:
+        lines = [f"(no log file found at {_APP_LOG_PATH})\n"]
+    return Response("".join(lines), mimetype="text/plain")
 
 
 def get_unclosed_discharge_report():
