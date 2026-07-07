@@ -905,7 +905,11 @@ def _load_discharge_intervals():
 # ---------------------------------------------------------------------------
 
 _DISCHARGE_AUTO_SYNC_ENABLED = os.environ.get("DISCHARGE_AUTO_SYNC", "1") != "0"
-_DISCHARGE_SYNC_INTERVAL_SECONDS = 1800   # matches the API's own ~30 min update cadence
+_DISCHARGE_SYNC_KEY = os.environ.get("DISCHARGE_SYNC_KEY")  # shared secret for /internal/sync-discharge-history
+_DISCHARGE_SYNC_INTERVAL_SECONDS = 1800   # matches the API's own ~30 min update cadence; point an external
+                                           # pinger (e.g. a second UptimeRobot monitor) at the endpoint below
+                                           # on this interval -- see _sync_discharge_history_once for why this
+                                           # isn't a plain background thread
 _DISCHARGE_SYNC_CATCHUP_BUFFER_DAYS = 1   # re-check the day before "last synced" too, for late-arriving data
 _DISCHARGE_UNCLOSED_MAX_RETRIES = 5       # give up on any single record after this many failed resolve attempts
 _DISCHARGE_UNCLOSED_BATCH_LIMIT = 20      # cap on how many still-open records get rechecked per sync cycle
@@ -994,6 +998,15 @@ def _retry_unclosed_discharge_records(conn, pending):
 
 
 def _sync_discharge_history_once():
+    """Runs on whatever thread calls it -- deliberately triggered by an HTTP
+    request (see the /internal/sync-discharge-history route) rather than a
+    background thread. libsql's Python client wraps a Rust/Tokio async
+    runtime that, in production on Render, deadlocked the entire gunicorn
+    worker (GIL held forever, worker killed by its own timeout, endless
+    boot-crash loop) the moment it was first connected to from a plain
+    threading.Thread. Every other Turso access in this app already happens
+    on a normal Flask request thread and was unaffected -- only a
+    separately-spawned background thread reaching for libsql triggered it."""
     conn = _discharge_backfill.db_connect()
     try:
         _ensure_sync_schema(conn)
@@ -1012,13 +1025,21 @@ def _sync_discharge_history_once():
         conn.close()
 
 
-def _discharge_history_sync_loop():
-    while True:
-        try:
-            _sync_discharge_history_once()
-        except Exception as e:
-            print(f"ERROR [discharge-sync]: {e!r}")
-        time.sleep(_DISCHARGE_SYNC_INTERVAL_SECONDS)
+@app.route("/internal/sync-discharge-history")
+def sync_discharge_history_endpoint():
+    """Point an external scheduler (a second UptimeRobot monitor, cron-job.org,
+    etc.) at this every _DISCHARGE_SYNC_INTERVAL_SECONDS. See
+    _sync_discharge_history_once's docstring for why this is HTTP-triggered
+    rather than a background thread."""
+    if not _DISCHARGE_AUTO_SYNC_ENABLED:
+        return jsonify({"status": "disabled"}), 503
+    if _DISCHARGE_SYNC_KEY and request.args.get("key") != _DISCHARGE_SYNC_KEY:
+        return jsonify({"error": "forbidden"}), 403
+    try:
+        _sync_discharge_history_once()
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"status": "error", "detail": repr(e)}), 500
 
 
 def get_unclosed_discharge_report():
@@ -1378,10 +1399,6 @@ def _prewarm():
 
 
 threading.Thread(target=_prewarm, daemon=True).start()
-
-if _DISCHARGE_AUTO_SYNC_ENABLED:
-    threading.Thread(target=_discharge_history_sync_loop, daemon=True).start()
-
 
 if __name__ == "__main__":
     app.run(debug=os.environ.get("FLASK_DEBUG", "0") == "1")
