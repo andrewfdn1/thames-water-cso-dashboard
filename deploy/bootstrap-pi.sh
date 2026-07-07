@@ -30,8 +30,9 @@ python3 -m venv "$APP_DIR/venv"
 "$APP_DIR/venv/bin/pip" install --upgrade pip
 "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 
-echo "== Installing systemd service =="
-sudo cp "$APP_DIR/deploy/thames-cso-dashboard.service" /etc/systemd/system/thames-cso-dashboard.service
+echo "== Installing systemd service (running as $(whoami)) =="
+sed "s/__APP_USER__/$(whoami)/" "$APP_DIR/deploy/thames-cso-dashboard.service" \
+  | sudo tee /etc/systemd/system/thames-cso-dashboard.service >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable thames-cso-dashboard.service
 

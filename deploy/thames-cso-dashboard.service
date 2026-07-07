@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
+User=__APP_USER__
 WorkingDirectory=/opt/thames-cso-dashboard
 EnvironmentFile=/opt/thames-cso-dashboard/.env
 ExecStart=/opt/thames-cso-dashboard/venv/bin/gunicorn app:app --timeout 180 --bind 127.0.0.1:8000
