@@ -231,33 +231,52 @@ here than it would on a dedicated host.
 Full step-by-step runbook: `docs/deploy-raspberry-pi.md`. Key facts not
 obvious from the code:
 
-- Public HTTPS via a **Cloudflare quick tunnel**
-  (`cloudflared tunnel --url http://127.0.0.1:8000`, no Cloudflare account
-  or domain needed) rather than a named tunnel — chosen deliberately for
-  now to avoid domain cost/setup during early testing. **The public URL
-  changes every time the `cloudflared-quicktunnel` service restarts**
-  (Pi reboot, crash-recovery, etc) — if it changes, the `PI_DASHBOARD_URL`
-  GitHub secret needs manual updating or `pi-logs.yml` will fail to reach
-  it. Current URL: `sudo systemctl status cloudflared-quicktunnel | grep trycloudflare`
-  or check `/opt/thames-cso-dashboard/logs/cloudflared.log`. Upgrading to
-  a permanent named tunnel + real domain later is documented as a ~15
-  minute change in `docs/deploy-raspberry-pi.md` and
-  `deploy/cloudflared-config.yml.example` — it requires zero changes to
-  the app itself.
+- Public HTTPS via a **named Cloudflare Tunnel**, routed to a subdomain
+  (tested against `waterquality.edwarddoughty.com`, a spare unused domain
+  on the same WordPress.com account, before committing to buying a
+  dedicated domain — `waterquality.uk` was the intended permanent home at
+  time of writing; check `deploy/cloudflared-config.yml.example` and
+  `/etc/cloudflared/config.yml` on the Pi for whatever the current live
+  hostname actually is). Started out on a **quick tunnel**
+  (`cloudflared tunnel --url ...`, no account needed, but the URL changes
+  on every restart) before upgrading — `deploy/cloudflared-quicktunnel.service`
+  is kept in the repo as that fallback/starting option, but isn't what's
+  actually running once a named tunnel is configured.
+  **Important, non-obvious fact discovered the hard way**: Cloudflare's
+  self-service "Add a Site" onboarding only accepts root/registrable
+  domains, not subdomains — you cannot add `foo.example.com` as its own
+  zone through the normal UI. Routing a subdomain therefore requires
+  onboarding the *entire* root domain to Cloudflare (nameservers moved
+  there), which is why a spare, unused domain was used for testing rather
+  than a subdomain of a domain with an active site/email on it.
 - gunicorn binds `127.0.0.1:8000` only, never `0.0.0.0` — the tunnel is
   the only path in from the public internet.
-- Auto-deploy is a **GitHub Actions self-hosted runner** registered on the
-  Pi (chosen over a lightweight polling script despite the RAM cost, per
-  explicit instruction, to get near-instant deploys and reuse existing
-  GitHub Actions familiarity). `.github/workflows/deploy-to-pi.yml`
-  triggers on push to `main`, runs `deploy/sync-and-restart.sh` (rsyncs
-  the fresh checkout into `/opt/thames-cso-dashboard`, excluding `.git`,
-  `venv`, `logs`, `.env`; reinstalls Python deps only if
-  `requirements.txt` changed; restarts the systemd service; fails the
-  workflow if the service doesn't come back healthy). The runner user has
-  narrowly-scoped passwordless sudo for exactly one command
-  (`systemctl restart thames-cso-dashboard.service`), set up by
-  `deploy/bootstrap-pi.sh` — nothing broader.
+- Auto-deploy is a **local systemd timer** (`thames-cso-poll-deploy.timer`,
+  installed by `bootstrap-pi.sh`), not a GitHub Actions self-hosted
+  runner — a runner was the original plan but registering one
+  (`config.sh`) hit an unresolved `.NET`/OpenSSL TLS handshake failure
+  specific to 32-bit ARM (`armv7l`) + Raspberry Pi OS 13/Trixie (`curl`
+  to the same URL worked fine, ruling out a real network problem — this
+  points at a `.NET`-on-ARM32 certificate-store issue, not something this
+  app's code can fix). The timer runs `deploy/poll-and-deploy.sh` every 2
+  minutes: `git fetch origin main`, and if there are new commits,
+  `git reset --hard origin/main` on the persistent checkout followed by
+  `deploy/sync-and-restart.sh <checkout-dir>` (rsyncs into
+  `/opt/thames-cso-dashboard`, excluding `.git`, `venv`, `logs`, `.env`;
+  reinstalls Python deps only if `requirements.txt` changed; restarts the
+  systemd service). That user has narrowly-scoped passwordless sudo for
+  exactly one command (`systemctl restart thames-cso-dashboard.service`),
+  set up by `deploy/bootstrap-pi.sh` — nothing broader. Trade-off versus a
+  runner: a ~2 minute delay before a push takes effect, versus near-instant
+  — accepted deliberately to avoid an unresolved platform incompatibility
+  and an extra persistent agent process on an already memory-constrained
+  Pi.
+- Persistent journald logging (`/etc/systemd/journald.conf.d/persistent-storage.conf`,
+  capped at `SystemMaxUse=100M`) was enabled after a Pi hang left zero
+  diagnostic evidence (`journalctl -b -1` said "no persistent journal was
+  found" — Raspberry Pi OS defaults to volatile, RAM-only journal storage
+  that's wiped on every reboot). Without this, any future crash is
+  undiagnosable after the fact.
 - `render.yaml` and the Render-specific README section are kept but
   dormant — this app is not currently running on Render. If reviving
   Render deployment, re-read the Turso/libsql section above first; nothing

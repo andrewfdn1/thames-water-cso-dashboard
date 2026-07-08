@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll GitHub and deploy the Thames CSO dashboard if main has new commits
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__APP_USER__
+WorkingDirectory=__REPO_DIR__
+ExecStart=__REPO_DIR__/deploy/poll-and-deploy.sh

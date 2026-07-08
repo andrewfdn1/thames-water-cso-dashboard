@@ -23,8 +23,8 @@ sudo systemctl status thames-cso-dashboard   # should be active (running)
 curl -s http://127.0.0.1:8000/ping           # should return {"status": "ok"} or similar
 ```
 
-`<runner-user>` is whichever OS user will run the GitHub Actions
-self-hosted runner (see below) -- bootstrap-pi.sh grants that user
+`<runner-user>` is whichever OS user the poll-and-deploy timer runs as
+(normally just your own login user) -- bootstrap-pi.sh grants that user
 passwordless sudo for exactly one command (`systemctl restart
 thames-cso-dashboard.service`), nothing broader.
 
@@ -37,7 +37,9 @@ ever listens on `127.0.0.1:8000`, never exposed directly.
 
 ```bash
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb -o cloudflared.deb
-# use cloudflared-linux-arm.deb instead if `uname -m` says armv7l/armhf, not aarch64
+# use cloudflared-linux-armhf.deb instead if `uname -m` says armv7l (32-bit,
+# e.g. a Pi 3B+ on standard Raspberry Pi OS) -- NOT cloudflared-linux-arm.deb,
+# that's a different, incompatible architecture tag despite the name
 sudo dpkg -i cloudflared.deb
 
 sudo cp deploy/cloudflared-quicktunnel.service /etc/systemd/system/
@@ -62,30 +64,41 @@ changes to the app itself -- see that file for the upgrade path.
 If the URL changes, remember to update the `PI_DASHBOARD_URL` secret
 (below) so the log-fetching workflow keeps working.
 
-## Auto-deploy on every push (GitHub Actions self-hosted runner)
+## Auto-deploy on every push (local poll-and-deploy timer)
 
-On the Pi, following GitHub's own instructions (Settings -> Actions ->
-Runners -> New self-hosted runner on the repo), then:
+`bootstrap-pi.sh` already installs and enables this -- nothing further to
+do unless you're setting it up manually. It's a `thames-cso-poll-deploy`
+systemd timer that runs `deploy/poll-and-deploy.sh` every 2 minutes: `git
+fetch origin main`, and if there are new commits, `git reset --hard
+origin/main` on the persistent checkout followed by
+`deploy/sync-and-restart.sh` (rsyncs into `/opt/thames-cso-dashboard`,
+reinstalls dependencies only if `requirements.txt` changed, restarts the
+service).
+
+Check it's running:
 
 ```bash
-sudo ./svc.sh install <runner-user>
-sudo ./svc.sh start
+systemctl status thames-cso-poll-deploy.timer --no-pager
+systemctl list-timers thames-cso-poll-deploy.timer --no-pager
 ```
 
-so the runner survives reboots as its own systemd service, same as the
-app itself.
+**Why not a GitHub Actions self-hosted runner?** That was the original
+plan -- instant deploys, ties into existing Actions usage -- but
+registering one on this Pi (32-bit ARM, Raspberry Pi OS 13/Trixie) hit an
+unresolved `.NET`/OpenSSL TLS handshake failure (`config.sh` couldn't
+open an HTTPS connection to github.com at all, even though `curl` to the
+same URL worked fine, pointing at a `.NET`-on-ARM32 certificate-store
+issue rather than a real network problem). Rather than keep fighting an
+unclear platform incompatibility, the local timer avoids the whole
+category of problem -- it's plain `git` and `bash`, nothing .NET-based
+running at all -- at the cost of a ~2 minute delay before a push takes
+effect instead of near-instant.
 
 Add these repository secrets (Settings -> Secrets and variables ->
 Actions) so the log-fetching workflow below can reach the Pi:
 
 - `PI_DASHBOARD_URL` -- e.g. `https://cso.yourdomain.com`
 - `PI_LOGS_KEY` -- must match `LOGS_KEY` in the Pi's `.env`
-
-`.github/workflows/deploy-to-pi.yml` then runs on the Pi's own runner on
-every push to `main`: checks out the new code, runs
-`deploy/sync-and-restart.sh` (rsyncs into `/opt/thames-cso-dashboard`,
-reinstalls dependencies only if `requirements.txt` changed, restarts the
-service, and fails the workflow if it doesn't come back up healthy).
 
 ## Checking logs without copying them by hand
 
@@ -95,13 +108,40 @@ that runs on GitHub's own infrastructure (not the Pi), hits
 prints the results into the workflow's own job log -- viewable directly
 through the GitHub Actions UI or API, no copy-pasting required.
 
-## Resource notes (1GB RAM, shared with the kiosk)
+## Persistent logging across reboots
+
+Off by default on Raspberry Pi OS (journald and the kernel's `dmesg`
+buffer both live in RAM and are wiped on every reboot) -- worth doing
+once, since it's the difference between having real evidence after a
+crash and finding nothing at all:
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo tee /etc/systemd/journald.conf.d/persistent-storage.conf > /dev/null << 'EOF'
+[Journal]
+Storage=persistent
+SystemMaxUse=100M
+EOF
+sudo mkdir -p /var/log/journal
+sudo systemd-tmpfiles --create --prefix /var/log/journal
+sudo systemctl restart systemd-journald
+```
+
+After a future reboot, `sudo journalctl -b -1 --no-pager | tail -150` and
+`sudo journalctl -b -1 -k --no-pager | grep -i -E "oom|out of memory|killed process"`
+will actually show what happened, instead of "no persistent journal was
+found."
+
+## Resource notes (869MB RAM measured, shared with the kiosk)
 
 - `gunicorn.conf.py` already pins `workers = 1` -- keep it that way.
 - Check `free -h` after everything is running; if it's tight, the kiosk's
   Chromium is almost certainly the larger consumer, not this Flask app.
-- The GitHub Actions runner's own background agent has a real, constant
-  RAM footprint (Node-based) -- if memory pressure becomes a problem,
-  switching `deploy-to-pi.yml`'s trigger to a lightweight polling script
-  (`git fetch` + compare SHA on a systemd timer) removes that footprint
-  entirely without changing anything else.
+- The poll-and-deploy timer is a `Type=oneshot` service that runs for a
+  few seconds every 2 minutes and exits -- effectively zero idle
+  footprint, unlike a persistent runner agent process would have been.
+- Persistent journald logging is enabled (capped at `SystemMaxUse=100M`
+  via `/etc/systemd/journald.conf.d/persistent-storage.conf`) so a future
+  crash/reboot leaves `journalctl -b -1` evidence to look at, instead of
+  the "no persistent journal was found" dead end this project hit once
+  already.

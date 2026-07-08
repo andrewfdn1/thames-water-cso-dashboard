@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Thames CSO dashboard poll-and-deploy check every 2 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Unit=thames-cso-poll-deploy.service
+
+[Install]
+WantedBy=timers.target

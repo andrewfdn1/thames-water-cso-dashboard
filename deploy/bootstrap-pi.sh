@@ -36,11 +36,19 @@ sed "s/__APP_USER__/$(whoami)/" "$APP_DIR/deploy/thames-cso-dashboard.service" \
 sudo systemctl daemon-reload
 sudo systemctl enable thames-cso-dashboard.service
 
-echo "== Allowing passwordless restart of just this one service (for the CI auto-deploy) =="
+echo "== Allowing passwordless restart of just this one service (for the poll-deploy timer) =="
 RUNNER_USER="${1:-$(whoami)}"
 SUDOERS_LINE="${RUNNER_USER} ALL=(root) NOPASSWD: /bin/systemctl restart thames-cso-dashboard.service"
 echo "$SUDOERS_LINE" | sudo tee /etc/sudoers.d/thames-cso-dashboard-restart >/dev/null
 sudo chmod 440 /etc/sudoers.d/thames-cso-dashboard-restart
+
+echo "== Installing poll-and-deploy timer (checks GitHub every 2 minutes) =="
+sed -e "s/__APP_USER__/$(whoami)/" -e "s|__REPO_DIR__|$REPO_DIR|g" \
+  "$REPO_DIR/deploy/thames-cso-poll-deploy.service" \
+  | sudo tee /etc/systemd/system/thames-cso-poll-deploy.service >/dev/null
+sudo cp "$REPO_DIR/deploy/thames-cso-poll-deploy.timer" /etc/systemd/system/thames-cso-poll-deploy.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now thames-cso-poll-deploy.timer
 
 echo ""
 echo "Done. Next steps:"
