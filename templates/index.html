@@ -60,7 +60,7 @@
       {% set is_tunnel_row = w.name == 'Tideway Tunnel' %}
       {% set is_subtotal_row = w.name == 'Total discharges into waterways' %}
       <tr class="{{ 'tunnel-row' if is_tunnel_row else '' }}">
-        <td{% if is_subtotal_row %} style="font-weight:600;"{% endif %}>{{ w.name }}{% if is_tunnel_row %} <span style="color:var(--status-good); font-size:0.8em;">(captured)</span>{% endif %}</td>
+        <td{% if is_subtotal_row %} style="font-weight:600;"{% endif %}>{% if is_subtotal_row %}{{ w.name }}{% else %}<a href="{{ url_for('map_view', zone=w.name) }}">{{ w.name }}</a>{% endif %}{% if is_tunnel_row %} <span style="color:var(--status-good); font-size:0.8em;">(captured)</span>{% endif %}</td>
         {% for win in windows %}
         {% set val = w.hours_by_window[win.key] %}
         <td class="num">

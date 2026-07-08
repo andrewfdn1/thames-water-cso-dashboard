@@ -128,6 +128,16 @@
   document.getElementById('legend-select-none').addEventListener('click', function () {
     categoriesSorted.forEach(function (category) { setCategoryOn(category, false); });
   });
+
+  // Arriving from the Summary page's "Discharge hours by watercourse" table
+  // (?zone=River Wandle) isolates the legend to just that one category,
+  // rather than requiring a manual toggle-everything-else-off first.
+  const requestedZone = new URLSearchParams(window.location.search).get('zone');
+  if (requestedZone && layersByCategory[requestedZone]) {
+    categoriesSorted.forEach(function (category) {
+      setCategoryOn(category, category === requestedZone);
+    });
+  }
 </script>
 </body>
 </html>
